@@ -3,7 +3,7 @@ import re
 from rest_framework import serializers
 from django.db.models import Max
 
-from assessments.models import Assessment, AssessmentBlueprintItem, AssessmentVersion, Grade, Question, QuestionOption, Section, SubSection, Tags
+from assessments.models import Assessment, AssessmentBlueprintItem, AssessmentVersion, Grade, InterpretationRule, Question, QuestionOption, Section, SubSection, Tags
 
 # ========================= Assessment =============================
 
@@ -1106,6 +1106,11 @@ class AssessmentVersionInputSerializer(serializers.Serializer):
         required=False,
         default=False
     )
+    
+    section_wise_randomize_question = serializers.BooleanField(
+        required=False,
+        default=False
+    )
 
     show_result_immediately = serializers.BooleanField(
         required=False,
@@ -1146,23 +1151,32 @@ class AssessmentSubSectionInputSerializer(serializers.Serializer):
         min_value=1
     )
 
-    question_ids = serializers.ListField(
-        child=serializers.IntegerField(
-            min_value=1
-        ),
+    questions = serializers.ListField(
+        child=serializers.DictField(),
         required=False,
-        allow_empty=True,
-        
+        allow_empty=True
     )
 
-    def validate_question_ids(self, value):
+    def validate(self, attrs):
 
-        if len(value) != len(set(value)):
-            raise serializers.ValidationError(
-                "Duplicate question IDs are not allowed."
-            )
+        questions = attrs.get("questions", [])
 
-        return value
+        question_ids = [
+            question.get("question_id")
+            for question in questions
+        ]
+
+        if any(not question_id for question_id in question_ids):
+            raise serializers.ValidationError({
+                "questions": "Each question must contain question_id."
+            })
+
+        if len(question_ids) != len(set(question_ids)):
+            raise serializers.ValidationError({
+                "questions": "Duplicate question IDs are not allowed."
+            })
+
+        return attrs
     
 class AssessmentSectionInputSerializer(serializers.Serializer):
 
@@ -1988,4 +2002,605 @@ class QuestionLibrarySerializer(serializers.ModelSerializer):
                 }
 
         return list(tags.values())
+    
+# ================================ Interpretation Serializer =============================
+    
+class InterpretationRuleSubsectionSerializer(serializers.Serializer):
+    id = serializers.IntegerField(required=False)
+    
+    subsection_id = serializers.IntegerField()
+
+    min_score = serializers.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        required=False,
+        allow_null=True
+    )
+
+    max_score = serializers.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        required=False,
+        allow_null=True
+    )
+
+    rating = serializers.CharField(
+        max_length=100,
+        required=False,
+        allow_blank=True
+    )
+
+    title = serializers.CharField(
+        max_length=100,
+        required=False,
+        allow_blank=True
+    )
+
+    performance_analysis = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True
+    )
+
+    action_plan = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True
+    )
+
+    action_plan_option1 = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True
+    )
+
+    action_plan_option2 = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True
+    )
+
+    action_plan_option3 = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True
+    )
+
+    action_plan_option4 = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True
+    )
+
+    action_plan_option5 = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True
+    )
+
+    display_color = serializers.CharField(
+        max_length=50,
+        required=False,
+        allow_blank=True,
+        allow_null=True
+    )
+
+    status = serializers.ChoiceField(
+        choices=InterpretationRule.Status.choices,
+        required=False
+    )
+
+
+class InterpretationRuleBulkCreateSerializer(serializers.Serializer):
+
+    assessment_version_id = serializers.IntegerField()
+
+    is_draft = serializers.BooleanField(
+        default=True
+    )
+
+    subsections = InterpretationRuleSubsectionSerializer(
+        many=True
+    )
+
+    def validate(self, attrs):
+
+        assessment_version_id = attrs.get(
+            "assessment_version_id"
+        )
+
+        is_draft = attrs.get(
+            "is_draft",
+            True
+        )
+
+        subsections = attrs.get(
+            "subsections",
+            []
+        )
+
+        # ==================================================
+        # VALIDATE ASSESSMENT VERSION
+        # ==================================================
+
+        try:
+
+            assessment_version = (
+                AssessmentVersion.objects.get(
+                    id=assessment_version_id
+                )
+            )
+
+        except AssessmentVersion.DoesNotExist:
+
+            raise serializers.ValidationError({
+                "assessment_version_id": (
+                    "Assessment version not found."
+                )
+            })
+
+        # ==================================================
+        # SUBSECTIONS REQUIRED
+        # ==================================================
+
+        if not subsections:
+
+            raise serializers.ValidationError({
+                "subsections": (
+                    "At least one subsection is required."
+                )
+            })
+
+        # ==================================================
+        # VALIDATE SUBSECTION IDs
+        # ==================================================
+
+        subsection_ids = [
+            item["subsection_id"]
+            for item in subsections
+        ]
+
+        existing_ids = set(
+            SubSection.objects.filter(
+                id__in=subsection_ids
+            ).values_list(
+                "id",
+                flat=True
+            )
+        )
+
+        invalid_ids = [
+            subsection_id
+            for subsection_id in subsection_ids
+            if subsection_id not in existing_ids
+        ]
+
+        if invalid_ids:
+
+            raise serializers.ValidationError({
+                "subsections": (
+                    f"Invalid subsection IDs: "
+                    f"{invalid_ids}"
+                )
+            })
+
+        # ==================================================
+        # NON-DRAFT VALIDATION
+        # ==================================================
+
+        if not is_draft:
+
+            errors = {}
+
+            for index, item in enumerate(subsections):
+
+                required_fields = [
+                    "min_score",
+                    "max_score",
+                    "rating",
+                    "title",
+                    "display_color",
+                ]
+
+                missing_fields = []
+
+                for field in required_fields:
+
+                    value = item.get(field)
+
+                    if value is None or value == "":
+
+                        missing_fields.append(
+                            field
+                        )
+
+                if missing_fields:
+
+                    errors[index] = {
+                        "missing_fields": missing_fields
+                    }
+
+            if errors:
+
+                raise serializers.ValidationError({
+                    "subsections": errors
+                })
+
+        # ==================================================
+        # ADD ASSESSMENT VERSION OBJECT
+        # ==================================================
+
+        attrs["assessment_version"] = (
+            assessment_version
+        )
+
+        return attrs
+    
+class InterpretationRuleBulkUpdateSerializer(serializers.Serializer):
+
+    assessment_version_id = serializers.IntegerField()
+
+    is_draft = serializers.BooleanField(
+        default=True
+    )
+
+    subsections = InterpretationRuleSubsectionSerializer(
+        many=True
+    )
+
+    def validate(self, attrs):
+
+        assessment_version_id = attrs.get(
+            "assessment_version_id"
+        )
+
+        is_draft = attrs.get(
+            "is_draft",
+            True
+        )
+
+        subsections = attrs.get(
+            "subsections",
+            []
+        )
+
+        # ==================================================
+        # VALIDATE ASSESSMENT VERSION
+        # ==================================================
+
+        try:
+
+            assessment_version = (
+                AssessmentVersion.objects.get(
+                    id=assessment_version_id
+                )
+            )
+
+        except AssessmentVersion.DoesNotExist:
+
+            raise serializers.ValidationError({
+                "assessment_version_id":
+                    "Assessment version not found."
+            })
+
+        # ==================================================
+        # SUBSECTIONS REQUIRED
+        # ==================================================
+
+        if not subsections:
+
+            raise serializers.ValidationError({
+                "subsections":
+                    "At least one subsection is required."
+            })
+
+        # ==================================================
+        # DUPLICATE INTERPRETATION IDS
+        # ==================================================
+
+        interpretation_ids = [
+            item["id"]
+            for item in subsections
+            if item.get("id") is not None
+        ]
+
+        if (
+            len(interpretation_ids)
+            != len(set(interpretation_ids))
+        ):
+
+            raise serializers.ValidationError({
+                "subsections":
+                    "Duplicate interpretation rule IDs are not allowed."
+            })
+
+        # ==================================================
+        # VALIDATE SUBSECTIONS
+        # ==================================================
+
+        subsection_ids = [
+            item["subsection_id"]
+            for item in subsections
+        ]
+
+        existing_subsection_ids = set(
+            SubSection.objects.filter(
+                id__in=subsection_ids
+            ).values_list(
+                "id",
+                flat=True
+            )
+        )
+
+        invalid_subsection_ids = [
+            subsection_id
+            for subsection_id in subsection_ids
+            if subsection_id not in existing_subsection_ids
+        ]
+
+        if invalid_subsection_ids:
+
+            raise serializers.ValidationError({
+                "subsections":
+                    f"Invalid subsection IDs: "
+                    f"{invalid_subsection_ids}"
+            })
+
+
+        # ==================================================
+        # DUPLICATE SCORE RANGE VALIDATION
+        # ==================================================
+
+        score_range_errors = {}
+
+        for index, item in enumerate(subsections):
+
+            interpretation_id = item.get("id")
+
+            subsection_id = item.get(
+                "subsection_id"
+            )
+
+            min_score = item.get(
+                "min_score"
+            )
+
+            max_score = item.get(
+                "max_score"
+            )
+
+            # ----------------------------------------------
+            # Draft mode can have incomplete score values
+            # ----------------------------------------------
+
+            if min_score is None or max_score is None:
+                continue
+
+            # ----------------------------------------------
+            # Validate min <= max
+            # ----------------------------------------------
+
+            if min_score > max_score:
+
+                score_range_errors[index] = {
+                    "subsection_id": subsection_id,
+                    "message": (
+                        "min_score cannot be greater "
+                        "than max_score."
+                    )
+                }
+
+                continue
+
+            # ----------------------------------------------
+            # Check duplicate inside current request
+            # ----------------------------------------------
+
+            for other_index, other_item in enumerate(
+                subsections
+            ):
+
+                if index == other_index:
+                    continue
+
+                if (
+                    other_item.get("subsection_id")
+                    != subsection_id
+                ):
+                    continue
+
+                other_min = other_item.get(
+                    "min_score"
+                )
+
+                other_max = other_item.get(
+                    "max_score"
+                )
+
+                if (
+                    other_min is None
+                    or other_max is None
+                ):
+                    continue
+
+                if (
+                    min_score == other_min
+                    and max_score == other_max
+                ):
+
+                    score_range_errors[index] = {
+                        "subsection_id": subsection_id,
+                        "min_score": str(min_score),
+                        "max_score": str(max_score),
+                        "message": (
+                            "This score range is duplicated "
+                            "for this subsection in the request."
+                        )
+                    }
+
+                    break
+
+            # ----------------------------------------------
+            # Check existing database record
+            # ----------------------------------------------
+
+            existing_rule_query = (
+                InterpretationRule.objects.filter(
+                    assessment_version_id=assessment_version_id,
+                    subsection_id=subsection_id,
+                    min_score=min_score,
+                    max_score=max_score,
+                )
+            )
+
+            # ----------------------------------------------
+            # If updating, exclude current record
+            # ----------------------------------------------
+
+            if interpretation_id:
+
+                existing_rule_query = (
+                    existing_rule_query.exclude(
+                        id=interpretation_id
+                    )
+                )
+
+            existing_rule = (
+                existing_rule_query.first()
+            )
+
+            if existing_rule:
+
+                score_range_errors[index] = {
+                    "subsection_id": subsection_id,
+                    "min_score": str(min_score),
+                    "max_score": str(max_score),
+                    "existing_interpretation_id": (
+                        existing_rule.id
+                    ),
+                    "message": (
+                        "This min_score and max_score "
+                        "already exist for this subsection."
+                    )
+                }
+
+
+        if score_range_errors:
+
+            raise serializers.ValidationError({
+                "subsections": score_range_errors
+            })
+
+        # ==================================================
+        # VALIDATE INTERPRETATION RULE IDS
+        # ==================================================
+
+        if interpretation_ids:
+
+            rules = InterpretationRule.objects.filter(
+                id__in=interpretation_ids
+            )
+
+            existing_rule_ids = set(
+                rules.values_list(
+                    "id",
+                    flat=True
+                )
+            )
+
+            invalid_rule_ids = [
+                rule_id
+                for rule_id in interpretation_ids
+                if rule_id not in existing_rule_ids
+            ]
+
+            if invalid_rule_ids:
+
+                raise serializers.ValidationError({
+                    "subsections":
+                        f"Invalid interpretation rule IDs: "
+                        f"{invalid_rule_ids}"
+                })
+
+            # ==================================================
+            # MAKE SURE RULE BELONGS TO SAME VERSION
+            # ==================================================
+
+            wrong_version_ids = list(
+                rules.exclude(
+                    assessment_version_id=assessment_version_id
+                ).values_list(
+                    "id",
+                    flat=True
+                )
+            )
+
+            if wrong_version_ids:
+
+                raise serializers.ValidationError({
+                    "subsections":
+                        "These interpretation rule IDs do not "
+                        "belong to the selected assessment version: "
+                        f"{wrong_version_ids}"
+                })
+
+        # # ==================================================
+        # # PUBLISHED VERSION CHECK
+        # # ==================================================
+
+        # if hasattr(assessment_version, "status"):
+
+        #     if assessment_version.status == "PUBLISHED":
+
+        #         raise serializers.ValidationError({
+        #             "assessment_version_id":
+        #                 "Published assessment version cannot "
+        #                 "be modified."
+        #         })
+
+        # ==================================================
+        # NON-DRAFT VALIDATION
+        # ==================================================
+
+        if not is_draft:
+
+            errors = {}
+
+            required_fields = [
+                "min_score",
+                "max_score",
+                "rating",
+                "display_color",
+            ]
+
+            for index, item in enumerate(subsections):
+
+                missing_fields = []
+
+                for field in required_fields:
+
+                    value = item.get(field)
+
+                    if value is None or value == "":
+
+                        missing_fields.append(
+                            field
+                        )
+
+                if missing_fields:
+
+                    errors[index] = {
+                        "missing_fields":
+                            missing_fields
+                    }
+
+            if errors:
+
+                raise serializers.ValidationError({
+                    "subsections": errors
+                })
+
+        attrs["assessment_version"] = assessment_version
+
+        return attrs
 

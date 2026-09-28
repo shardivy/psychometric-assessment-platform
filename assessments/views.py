@@ -2,7 +2,7 @@ from decimal import Decimal
 import re
 
 from django.db import IntegrityError, transaction
-from django.db.models import Q, Count, Prefetch, Sum
+from django.db.models import Q, Count, Exists, Max, OuterRef, Prefetch, Sum
 from django.shortcuts import render
 
 from django.utils import timezone
@@ -13,8 +13,8 @@ from rest_framework.views import APIView, api_settings
 from django.shortcuts import get_object_or_404
 from rest_framework.exceptions import ValidationError
 
-from assessments.models import Assessment, AssessmentBlueprintItem, AssessmentVersion, Grade, Question, QuestionGradeMapping, QuestionOption, Section, SubSection, Tags
-from assessments.serializers import AssessmentBlueprintListSerializer, AssessmentBuilderSerializer, AssessmentSerializer, AssessmentVersionBlueprintSerializer, AssessmentVersionListSerializer, AssessmentVersionSerializer, GradeSerializer, QuestionCreateUpdateSerializer, QuestionLibrarySerializer, QuestionListSerializer, QuestionRetrieveSerializer, SectionSerializer, SubSectionSerializer, TagsSerializer
+from assessments.models import Assessment, AssessmentBlueprintItem, AssessmentVersion, Grade, InterpretationRule, Question, QuestionGradeMapping, QuestionOption, Section, SubSection, Tags
+from assessments.serializers import AssessmentBlueprintListSerializer, AssessmentBuilderSerializer, AssessmentSerializer, AssessmentVersionBlueprintSerializer, AssessmentVersionListSerializer, AssessmentVersionSerializer, GradeSerializer, InterpretationRuleBulkCreateSerializer, InterpretationRuleBulkUpdateSerializer, QuestionCreateUpdateSerializer, QuestionLibrarySerializer, QuestionListSerializer, QuestionRetrieveSerializer, SectionSerializer, SubSectionSerializer, TagsSerializer
 from audit.models import ActivityLog, ActivityType, AuditAction, AuditLog
 from assessments.pagination import DefaultPagination
 from assessments.utils import generate_assessment_code
@@ -1834,13 +1834,10 @@ class AssessmentBuilderAPIView(APIView):
                             # Questions
                             # ----------------------------------
 
-                            if not subsection_data.get(
-                                "question_ids"
-                            ):
-
+                            if not subsection_data.get("questions"):
                                 raise ValidationError({
-                                    "question_ids": (
-                                        "Question IDs are required "
+                                    "questions": (
+                                        "Questions are required "
                                         "when publishing."
                                     )
                                 })
@@ -2171,6 +2168,16 @@ class AssessmentBuilderAPIView(APIView):
                             update_fields.append(
                                 "randomize_sections"
                             )
+                            
+                        if "section_wise_randomize_question" in version_data:
+                            version.section_wise_randomize_question = (
+                                version_data.get(
+                                    "section_wise_randomize_question"
+                                )
+                            )
+                            update_fields.append(
+                                "section_wise_randomize_question"
+                            )
 
                         if "show_result_immediately" in version_data:
                             version.show_result_immediately = (
@@ -2258,6 +2265,12 @@ class AssessmentBuilderAPIView(APIView):
                             randomize_sections=
                                 version_data.get(
                                     "randomize_sections",
+                                    False
+                                ),
+                                
+                            section_wise_randomize_question=
+                                version_data.get(
+                                    "section_wise_randomize_question",
                                     False
                                 ),
 
@@ -2451,12 +2464,11 @@ class AssessmentBuilderAPIView(APIView):
                             # Questions
                             # --------------------------------------
 
-                            question_ids.update(
-                                subsection_data.get(
-                                    "question_ids",
-                                    []
-                                )
-                            )
+                            for question_data in subsection_data.get("questions", []):
+                                question_id = question_data.get("question_id")
+
+                                if question_id:
+                                    question_ids.add(question_id)
 
                 # ==================================================
                 # BULK FETCH MASTER DATA
@@ -2596,10 +2608,11 @@ class AssessmentBuilderAPIView(APIView):
                             # QUESTION VALIDATION
                             # ==================================================
 
-                            for question_id in subsection_data.get(
-                                "question_ids",
+                            for question_data in subsection_data.get(
+                                "questions",
                                 []
                             ):
+                                question_id = question_data.get("question_id")
 
                                 question = questions.get(question_id)
 
@@ -2647,10 +2660,11 @@ class AssessmentBuilderAPIView(APIView):
                             []
                         ):
 
-                            for question_id in subsection_data.get(
-                                "question_ids",
+                            for question_data in subsection_data.get(
+                                "questions",
                                 []
                             ):
+                                question_id = question_data.get("question_id")
 
                                 key = (
                                     question_id,
@@ -2895,11 +2909,9 @@ class AssessmentBuilderAPIView(APIView):
                                 ]
                             ]
 
-                            question_list = (
-                                subsection_data.get(
-                                    "question_ids",
-                                    []
-                                )
+                            questions_data = subsection_data.get(
+                                "questions",
+                                []
                             )
 
                             # ==================================================
@@ -2923,7 +2935,7 @@ class AssessmentBuilderAPIView(APIView):
                             # }
                             # ==================================================
 
-                            if not question_list:
+                            if not questions_data:
 
                                 subsection_exists = (
                                     AssessmentBlueprintItem.objects
@@ -2987,7 +2999,11 @@ class AssessmentBuilderAPIView(APIView):
                             # GRADE + SECTION + SUBSECTION + QUESTIONS
                             # ==================================================
 
-                            for question_id in question_list:
+                            for question_data in questions_data:
+
+                                question_id = question_data.get(
+                                    "question_id"
+                                )
 
                                 # ==================================================
                                 # QUESTION -> GRADE MAPPING
@@ -3543,6 +3559,11 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
                                 if item.question
                                 else None
                             ),
+                            "question_text": (
+                                item.question.question_text
+                                if item.question
+                                else None
+                            )
                         },
 
                         "sequence_no": item.sequence_no,
@@ -3637,6 +3658,9 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
                             "randomize_sections": (
                                 version.randomize_sections
                             ),
+                            "section_wise_randomize_question": (
+                                version.section_wise_randomize_question
+                            ),
                             "show_result_immediately": (
                                 version.show_result_immediately
                             ),
@@ -3681,52 +3705,27 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-            
-            
-# class AssessmentBlueprintItemUpdateAPIView(APIView):
 
+# class AssessmentBlueprintItemUpdateAPIView(APIView):
 #     """
-#     Update complete Assessment Blueprint for a Version.
+#     Update complete Assessment Blueprint for an Assessment Version.
 
 #     PUT /api/assessment-builder/blueprint/<version_id>/
 #     """
 
 #     @transaction.atomic
-#     def put(self, request, blueprint_id):
+#     def put(self, request, version_id):
 
 #         try:
 
 #             # ==================================================
-#             # STEP 1: GET BLUEPRINT + VERSION
+#             # STEP 1: GET ASSESSMENT VERSION
 #             # ==================================================
-
-#             blueprint = (
-#                 AssessmentBlueprintItem.objects
-#                 .filter(id=blueprint_id)
-#                 .values("id", "assessment_version_id")
-#                 .first()
-#             )
-
-#             if not blueprint:
-
-#                 return Response(
-#                     {
-#                         "success": False,
-#                         "message": "Assessment blueprint item not found."
-#                     },
-#                     status=status.HTTP_404_NOT_FOUND
-#                 )
-
-#             # --------------------------------------------------
-#             # Lock the AssessmentVersion separately
-#             # --------------------------------------------------
 
 #             version = (
 #                 AssessmentVersion.objects
 #                 .select_for_update()
-#                 .filter(
-#                     id=blueprint["assessment_version_id"]
-#                 )
+#                 .filter(id=version_id)
 #                 .first()
 #             )
 
@@ -3739,7 +3738,305 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #                     },
 #                     status=status.HTTP_404_NOT_FOUND
 #                 )
+                
+#             # ==================================================
+#             # STEP 1A: GET / CREATE ASSESSMENT
+#             #
+#             # assessment.name can be:
+#             #
+#             # "1"                    -> Existing Assessment ID 1
+#             # "Aptitude Assessment"  -> Assessment name
+#             # ==================================================
 
+#             assessment_data = request.data.get(
+#                 "assessment"
+#             )
+
+#             if not assessment_data:
+
+#                 return Response(
+#                     {
+#                         "success": False,
+#                         "message": "Assessment data is required."
+#                     },
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+
+#             assessment_name = assessment_data.get(
+#                 "name"
+#             )
+
+#             if not assessment_name:
+
+#                 return Response(
+#                     {
+#                         "success": False,
+#                         "message": (
+#                             "Assessment name or ID is required."
+#                         )
+#                     },
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+
+#             assessment_name = str(
+#                 assessment_name
+#             ).strip()
+
+
+#             # ==================================================
+#             # CASE 1:
+#             # name = "1"
+#             #
+#             # Treat as existing Assessment ID
+#             # ==================================================
+
+#             if assessment_name.isdigit():
+
+#                 assessment_id = int(
+#                     assessment_name
+#                 )
+
+#                 assessment = (
+#                     Assessment.objects
+#                     .filter(
+#                         id=assessment_id
+#                     )
+#                     .first()
+#                 )
+
+#                 if not assessment:
+
+#                     return Response(
+#                         {
+#                             "success": False,
+#                             "message": (
+#                                 f"Assessment with ID "
+#                                 f"{assessment_id} not found."
+#                             )
+#                         },
+#                         status=status.HTTP_400_BAD_REQUEST
+#                     )
+
+
+#             # ==================================================
+#             # CASE 2:
+#             # name = "Aptitude Assessment"
+#             #
+#             # Find existing or create new Assessment
+#             # ==================================================
+
+#             else:
+
+#                 assessment_type = assessment_data.get(
+#                     "assessment_type"
+#                 )
+
+#                 if not assessment_type:
+
+#                     return Response(
+#                         {
+#                             "success": False,
+#                             "message": (
+#                                 "assessment_type is required "
+#                                 "when creating a new assessment."
+#                             )
+#                         },
+#                         status=status.HTTP_400_BAD_REQUEST
+#                     )
+
+#                 assessment, created = (
+#                     Assessment.objects.get_or_create(
+#                         name=assessment_name,
+#                         defaults={
+#                             "short_name": assessment_data.get(
+#                                 "short_name",
+#                                 ""
+#                             ),
+#                             "assessment_type": assessment_type,
+#                             "description": assessment_data.get(
+#                                 "description"
+#                             ),
+#                             "default_language": assessment_data.get(
+#                                 "default_language",
+#                                 "en"
+#                             ),
+#                         }
+#                     )
+#                 )
+
+#                 # ----------------------------------------------
+#                 # Update existing assessment fields
+#                 # ----------------------------------------------
+
+#                 if not created:
+
+#                     update_fields = []
+
+#                     for field in [
+#                         "short_name",
+#                         "assessment_type",
+#                         "description",
+#                         "default_language",
+#                     ]:
+
+#                         value = assessment_data.get(
+#                             field
+#                         )
+
+#                         if value is not None:
+
+#                             setattr(
+#                                 assessment,
+#                                 field,
+#                                 value
+#                             )
+
+#                             update_fields.append(
+#                                 field
+#                             )
+
+#                     if update_fields:
+
+#                         assessment.save(
+#                             update_fields=update_fields
+#                         )
+
+
+#             # ==================================================
+#             # STEP 1B:
+#             # Attach Assessment to this Version
+#             #
+#             # ALSO UPDATE VERSION FIELDS IF SENT
+#             # ==================================================
+
+#             version_update_fields = []
+
+#             # --------------------------------------------------
+#             # Attach Assessment
+#             # --------------------------------------------------
+
+#             if version.assessment_id != assessment.id:
+
+#                 version.assessment = assessment
+
+#                 version_update_fields.append(
+#                     "assessment"
+#                 )
+
+
+#             # --------------------------------------------------
+#             # Update Assessment Version fields
+#             #
+#             # Only update fields that are provided.
+#             # Existing logic is not changed.
+#             # --------------------------------------------------
+
+#             version_data = request.data.get(
+#                 "version"
+#             )
+
+#             if version_data:
+
+#                 version_field_mapping = {
+#                     "version_number": "version_number",
+#                     "version_name": "version_name",
+#                     "report_template_id": "report_template",
+#                     "release_date": "release_date",
+#                     "effective_from": "effective_from",
+#                     "effective_to": "effective_to",
+#                     "duration_minutes": "duration_minutes",
+#                     "allow_resume": "allow_resume",
+#                     "allow_review": "allow_review",
+#                     "randomize_sections": "randomize_sections",
+#                     "show_result_immediately": "show_result_immediately",
+#                     "instructions": "instructions",
+#                 }
+
+#                 for request_field, model_field in version_field_mapping.items():
+
+#                     if request_field not in version_data:
+#                         continue
+
+#                     value = version_data.get(
+#                         request_field
+#                     )
+
+#                     # ----------------------------------------------
+#                     # Foreign Key: report_template_id
+#                     # ----------------------------------------------
+
+#                     if request_field == "report_template_id":
+
+#                         if value is not None:
+
+#                             report_template = (
+#                                 ReportTemplate.objects
+#                                 .filter(id=value)
+#                                 .first()
+#                             )
+
+#                             if not report_template:
+
+#                                 return Response(
+#                                     {
+#                                         "success": False,
+#                                         "message": (
+#                                             f"Report template with ID "
+#                                             f"{value} not found."
+#                                         )
+#                                     },
+#                                     status=status.HTTP_400_BAD_REQUEST
+#                                 )
+
+#                             version.report_template = (
+#                                 report_template
+#                             )
+
+#                             version_update_fields.append(
+#                                 "report_template"
+#                             )
+
+#                         else:
+
+#                             version.report_template = None
+
+#                             version_update_fields.append(
+#                                 "report_template"
+#                             )
+
+#                     # ----------------------------------------------
+#                     # Normal fields
+#                     # ----------------------------------------------
+
+#                     else:
+
+#                         setattr(
+#                             version,
+#                             model_field,
+#                             value
+#                         )
+
+#                         version_update_fields.append(
+#                             model_field
+#                         )
+
+
+#             # --------------------------------------------------
+#             # Save Version
+#             # --------------------------------------------------
+
+#             if version_update_fields:
+
+#                 version_update_fields.append(
+#                     "updated_at"
+#                 )
+
+#                 version.save(
+#                     update_fields=list(
+#                         set(version_update_fields)
+#                     )
+#                 )
+    
 #             # ==================================================
 #             # STEP 2: CHECK VERSION STATUS
 #             # ==================================================
@@ -3764,40 +4061,139 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #             # STEP 3: GET INPUT
 #             # ==================================================
 
-#             grades_data = request.data.get(
-#                 "blueprint_items",
-#                 []
+#             blueprint_items = request.data.get(
+#                 "blueprint_items"
 #             )
+
 #             is_draft = request.data.get(
 #                 "is_draft",
 #                 True
 #             )
+            
+#             blueprint_status = (
+#                 AssessmentBlueprintItem.Status.DRAFT
+#                 if is_draft
+#                 else AssessmentBlueprintItem.Status.ACTIVE
+#             )
 
-#             if not grades_data:
+#             # --------------------------------------------------
+#             # If blueprint_items are not provided
+#             # --------------------------------------------------
+#             #
+#             # Draft:
+#             #     Allow update without blueprint_items.
+#             #
+#             # Publish:
+#             #     blueprint_items are required.
+#             # --------------------------------------------------
+
+#             if not blueprint_items:
+
+#                 if not is_draft:
+
+#                     return Response(
+#                         {
+#                             "success": False,
+#                             "message": (
+#                                 "blueprint_items is required "
+#                                 "when publishing."
+#                             )
+#                         },
+#                         status=status.HTTP_400_BAD_REQUEST
+#                     )
+
+#                 # --------------------------------------------------
+#                 # Draft update without blueprint
+#                 #
+#                 # Do not change existing blueprint.
+#                 # Simply continue and return success.
+#                 # --------------------------------------------------
 
 #                 return Response(
 #                     {
-#                         "success": False,
-#                         "message": "blueprint_items is required."
+#                         "success": True,
+
+#                         "message": (
+#                             "Assessment draft updated successfully."
+#                         ),
+
+#                         "data": {
+#                             "assessment_version": {
+#                                 "id": version.id,
+
+#                                 "public_id": str(
+#                                     version.public_id
+#                                 ),
+
+#                                 "version_number":
+#                                     version.version_number,
+
+#                                 "status":
+#                                     version.status,
+
+#                                 "total_sections":
+#                                     version.total_sections,
+
+#                                 "total_subsections":
+#                                     version.total_subsections,
+
+#                                 "total_questions":
+#                                     version.total_questions,
+
+#                                 "total_marks":
+#                                     version.total_marks,
+#                             },
+
+#                             "blueprint": None
+#                         }
 #                     },
-#                     status=status.HTTP_400_BAD_REQUEST
+#                     status=status.HTTP_200_OK
 #                 )
-                
-            
+
 #             # ==================================================
-#             # STEP 3A: PUBLISHING VALIDATION
+#             # STEP 4: PUBLISH VALIDATION
 #             # ==================================================
 
 #             if not is_draft:
 
-#                 # ----------------------------------------------
-#                 # Validate complete blueprint hierarchy
-#                 # ----------------------------------------------
-
-#                 for grade_data in grades_data:
+#                 for grade_data in blueprint_items:
 
 #                     # ------------------------------------------
-#                     # Sections are required for publishing
+#                     # GRADE
+#                     # ------------------------------------------
+
+#                     if not grade_data.get("grade_id"):
+
+#                         return Response(
+#                             {
+#                                 "success": False,
+#                                 "message": (
+#                                     "Grade ID is required "
+#                                     "when publishing."
+#                                 )
+#                             },
+#                             status=status.HTTP_400_BAD_REQUEST
+#                         )
+
+#                     # ------------------------------------------
+#                     # BOARD
+#                     # ------------------------------------------
+
+#                     if not grade_data.get("board"):
+
+#                         return Response(
+#                             {
+#                                 "success": False,
+#                                 "message": (
+#                                     "Board is required "
+#                                     "when publishing."
+#                                 )
+#                             },
+#                             status=status.HTTP_400_BAD_REQUEST
+#                         )
+
+#                     # ------------------------------------------
+#                     # SECTIONS
 #                     # ------------------------------------------
 
 #                     if not grade_data.get("sections"):
@@ -3813,14 +4209,10 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #                             status=status.HTTP_400_BAD_REQUEST
 #                         )
 
-#                     # ------------------------------------------
-#                     # Validate Sections
-#                     # ------------------------------------------
-
 #                     for section_data in grade_data["sections"]:
 
 #                         # --------------------------------------
-#                         # SubSections are required
+#                         # SUBSECTIONS
 #                         # --------------------------------------
 
 #                         if not section_data.get("subsections"):
@@ -3836,16 +4228,12 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #                                 status=status.HTTP_400_BAD_REQUEST
 #                             )
 
-#                         # --------------------------------------
-#                         # Validate SubSections
-#                         # --------------------------------------
-
 #                         for subsection_data in section_data[
 #                             "subsections"
 #                         ]:
 
 #                             # ----------------------------------
-#                             # Questions are required
+#                             # QUESTIONS
 #                             # ----------------------------------
 
 #                             if not subsection_data.get(
@@ -3864,7 +4252,7 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #                                 )
 
 #             # ==================================================
-#             # STEP 4: COLLECT IDS
+#             # STEP 5: COLLECT IDS
 #             # ==================================================
 
 #             grade_ids = set()
@@ -3872,23 +4260,16 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #             subsection_ids = set()
 #             question_ids = set()
 
-#             for grade_data in grades_data:
-
-#                 # ----------------------------------------------
-#                 # Grade
-#                 # ----------------------------------------------
+#             for grade_data in blueprint_items:
 
 #                 grade_id = grade_data.get("grade_id")
 
 #                 if grade_id:
 #                     grade_ids.add(grade_id)
 
-#                 # ----------------------------------------------
-#                 # Sections
-#                 # ----------------------------------------------
-
 #                 for section_data in grade_data.get(
-#                     "sections", []
+#                     "sections",
+#                     []
 #                 ):
 
 #                     section_id = section_data.get(
@@ -3898,12 +4279,9 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #                     if section_id:
 #                         section_ids.add(section_id)
 
-#                     # ------------------------------------------
-#                     # SubSections
-#                     # ------------------------------------------
-
 #                     for subsection_data in section_data.get(
-#                         "subsections", []
+#                         "subsections",
+#                         []
 #                     ):
 
 #                         subsection_id = subsection_data.get(
@@ -3915,10 +4293,6 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #                                 subsection_id
 #                             )
 
-#                         # --------------------------------------
-#                         # Questions
-#                         # --------------------------------------
-
 #                         question_ids.update(
 #                             subsection_data.get(
 #                                 "question_ids",
@@ -3927,7 +4301,7 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #                         )
 
 #             # ==================================================
-#             # STEP 5: FETCH MASTER DATA
+#             # STEP 6: FETCH MASTER DATA
 #             # ==================================================
 
 #             grades = {
@@ -3959,7 +4333,7 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #             }
 
 #             # ==================================================
-#             # STEP 6: VALIDATE GRADES
+#             # STEP 7: VALIDATE MASTER IDS
 #             # ==================================================
 
 #             missing_grades = (
@@ -3979,10 +4353,6 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #                     status=status.HTTP_400_BAD_REQUEST
 #                 )
 
-#             # ==================================================
-#             # STEP 7: VALIDATE SECTIONS
-#             # ==================================================
-
 #             missing_sections = (
 #                 section_ids - set(sections.keys())
 #             )
@@ -3999,10 +4369,6 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #                     },
 #                     status=status.HTTP_400_BAD_REQUEST
 #                 )
-
-#             # ==================================================
-#             # STEP 8: VALIDATE SUBSECTIONS
-#             # ==================================================
 
 #             missing_subsections = (
 #                 subsection_ids
@@ -4021,10 +4387,6 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #                     },
 #                     status=status.HTTP_400_BAD_REQUEST
 #                 )
-
-#             # ==================================================
-#             # STEP 9: VALIDATE QUESTIONS
-#             # ==================================================
 
 #             missing_questions = (
 #                 question_ids
@@ -4045,52 +4407,106 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #                 )
 
 #             # ==================================================
-#             # STEP 10: DUPLICATE QUESTION VALIDATION
+#             # STEP 8:
+#             # DUPLICATE QUESTION VALIDATION
+#             #
+#             # Same question CAN be used for different grades.
+#             #
+#             # Allowed:
+#             #
+#             # Grade 25 + Section 19 + SubSection 29 + Question 20
+#             # Grade 29 + Section 20 + SubSection 29 + Question 20
+#             #
+#             # Not allowed:
+#             #
+#             # Grade 25 + Section 19 + SubSection 29 + Question 20
+#             # Grade 25 + Section 19 + SubSection 29 + Question 20
 #             # ==================================================
 
-#             all_question_ids = []
+#             assigned_questions = set()
 
-#             for grade_data in grades_data:
+#             for grade_data in blueprint_items:
 
-#                 for section_data in grade_data["sections"]:
-
-#                     for subsection_data in (
-#                         section_data["subsections"]
-#                     ):
-
-#                         all_question_ids.extend(
-#                             subsection_data.get(
-#                                 "question_ids",
-#                                 []
-#                             )
-#                         )
-
-#             if len(all_question_ids) != len(
-#                 set(all_question_ids)
-#             ):
-
-#                 return Response(
-#                     {
-#                         "success": False,
-#                         "message": (
-#                             "A question cannot be assigned "
-#                             "more than once in the same "
-#                             "assessment version."
-#                         )
-#                     },
-#                     status=status.HTTP_400_BAD_REQUEST
+#                 grade_id = grade_data.get(
+#                     "grade_id"
 #                 )
 
+#                 for section_data in grade_data.get(
+#                     "sections",
+#                     []
+#                 ):
+
+#                     section_id = section_data.get(
+#                         "section_id"
+#                     )
+
+#                     for subsection_data in section_data.get(
+#                         "subsections",
+#                         []
+#                     ):
+
+#                         subsection_id = subsection_data.get(
+#                             "subsection_id"
+#                         )
+
+#                         for question_id in subsection_data.get(
+#                             "question_ids",
+#                             []
+#                         ):
+
+#                             assignment_key = (
+#                                 grade_id,
+#                                 section_id,
+#                                 subsection_id,
+#                                 question_id,
+#                             )
+
+#                             if assignment_key in assigned_questions:
+
+#                                 return Response(
+#                                     {
+#                                         "success": False,
+#                                         "message": (
+#                                             f"Question {question_id} "
+#                                             f"is already assigned to "
+#                                             f"Grade {grade_id}, "
+#                                             f"Section {section_id}, "
+#                                             f"SubSection {subsection_id}."
+#                                         )
+#                                     },
+#                                     status=status.HTTP_400_BAD_REQUEST
+#                                 )
+
+#                             assigned_questions.add(
+#                                 assignment_key
+#                             )
+
 #             # ==================================================
-#             # STEP 11:
-#             # QUESTION -> SUBSECTION VALIDATION
+#             # STEP 9:
+#             # VALIDATE HIERARCHY
+#             #
+#             # Question does NOT contain subsection_id.
+#             #
+#             # Relationship:
+#             #
+#             # Grade
+#             #   ↓
+#             # Section
+#             #   ↓
+#             # SubSection
+#             #   ↓
+#             # Blueprint Item
+#             #   ↓
+#             # Question
 #             # ==================================================
 
-#             for grade_data in grades_data:
+#             for grade_data in blueprint_items:
 
 #                 grade_id = grade_data.get("grade_id")
 
-#                 if grade_id not in grades:
+#                 grade = grades.get(grade_id)
+
+#                 if not grade:
 
 #                     return Response(
 #                         {
@@ -4102,9 +4518,9 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #                         status=status.HTTP_400_BAD_REQUEST
 #                     )
 
-#                 # ----------------------------------------------
-#                 # Sections are optional for draft
-#                 # ----------------------------------------------
+#                 # --------------------------------------------------
+#                 # Sections
+#                 # --------------------------------------------------
 
 #                 for section_data in grade_data.get(
 #                     "sections",
@@ -4132,19 +4548,17 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #                             status=status.HTTP_400_BAD_REQUEST
 #                         )
 
-#                     # ------------------------------------------
-#                     # SubSections are optional for draft
-#                     # ------------------------------------------
+#                     # --------------------------------------------------
+#                     # SubSections
+#                     # --------------------------------------------------
 
 #                     for subsection_data in section_data.get(
 #                         "subsections",
 #                         []
 #                     ):
 
-#                         subsection_id = (
-#                             subsection_data.get(
-#                                 "subsection_id"
-#                             )
+#                         subsection_id = subsection_data.get(
+#                             "subsection_id"
 #                         )
 
 #                         subsection = subsections.get(
@@ -4165,9 +4579,12 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #                                 status=status.HTTP_400_BAD_REQUEST
 #                             )
 
-#                         # --------------------------------------
-#                         # Questions are optional for draft
-#                         # --------------------------------------
+#                         # --------------------------------------------------
+#                         # Questions
+#                         #
+#                         # Question does NOT have subsection_id.
+#                         # Therefore, only validate that the question exists.
+#                         # --------------------------------------------------
 
 #                         for question_id in subsection_data.get(
 #                             "question_ids",
@@ -4192,10 +4609,46 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #                                     status=status.HTTP_400_BAD_REQUEST
 #                                 )
 
+#             # ==================================================
+#             # STEP 10:
+#             # QUESTION -> GRADE MAPPING
+#             # ==================================================
+
+#             question_grade_mappings = set(
+#                 QuestionGradeMapping.objects.filter(
+#                     question_id__in=question_ids,
+#                     grade_id__in=grade_ids,
+#                 ).values_list(
+#                     "question_id",
+#                     "grade_id",
+#                 )
+#             )
+
+#             for grade_data in blueprint_items:
+
+#                 grade_id = grade_data.get(
+#                     "grade_id"
+#                 )
+
+#                 for section_data in grade_data.get(
+#                     "sections",
+#                     []
+#                 ):
+
+#                     for subsection_data in section_data.get(
+#                         "subsections",
+#                         []
+#                     ):
+
+#                         for question_id in subsection_data.get(
+#                             "question_ids",
+#                             []
+#                         ):
+
 #                             if (
-#                                 question.subsection_id
-#                                 != subsection_id
-#                             ):
+#                                 question_id,
+#                                 grade_id
+#                             ) not in question_grade_mappings:
 
 #                                 return Response(
 #                                     {
@@ -4203,117 +4656,1200 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #                                         "message": (
 #                                             f"Question "
 #                                             f"{question_id} "
-#                                             f"does not belong "
-#                                             f"to SubSection "
-#                                             f"{subsection_id}."
+#                                             f"is not mapped "
+#                                             f"to Grade "
+#                                             f"{grade_id}."
 #                                         )
 #                                     },
 #                                     status=status.HTTP_400_BAD_REQUEST
 #                                 )
 
 #             # ==================================================
-#             # STEP 12:
-#             # DELETE OLD BLUEPRINT
+#             # STEP 11:
+#             # UPDATE / CREATE BLUEPRINT ITEMS
+#             #
+#             # IMPORTANT:
+#             # Existing blueprint rows are NOT deleted.
+#             #
+#             # Logic:
+#             # 1. Exact existing combination -> UPDATE
+#             # 2. Empty blueprint row -> REUSE ONLY ONCE
+#             # 3. If no empty row remains -> CREATE NEW
+#             #
+#             # Example:
+#             #
+#             # Existing DB:
+#             #   id=10, grade=NULL, section=NULL,
+#             #          subsection=NULL, question=NULL
+#             #
+#             # Request:
+#             #   Grade 25
+#             #   Grade 29
+#             #
+#             # Result:
+#             #
+#             #   id=10 -> Grade 25
+#             #   new id=11 -> Grade 29
+#             #
+#             # NEVER use id=10 for both grades.
 #             # ==================================================
 
-#             if not is_draft:
+#             existing_blueprint_qs = (
+#                 AssessmentBlueprintItem.objects
+#                 .filter(
+#                     assessment_version_id=version_id
+#                 )
+#                 .order_by("id")
+#             )
 
+#             existing_blueprints = {
+#                 (
+#                     item.assessment_version_id,
+#                     item.grade_id,
+#                     item.board,
+#                     item.section_id,
+#                     item.subsection_id,
+#                     item.question_id,
+#                 ): item
+#                 for item in existing_blueprint_qs
+#             }
+            
+#             # ==========================================================
+#             # HELPER:
+#             # FIND EXISTING BLUEPRINT
+#             #
+#             # Priority:
+#             #
+#             # 1. Exact combination
+#             # 2. Same grade + board + section
+#             # 3. Same grade + board + section + subsection
+#             # 4. Existing grade-only row
+#             #
+#             # This prevents duplicate rows for the same grade.
+#             # ==========================================================
+
+#             def find_existing_blueprint(
+#                 grade_id,
+#                 board,
+#                 section_id=None,
+#                 subsection_id=None,
+#                 question_id=None,
+#             ):
+#                 """
+#                 Find an existing blueprint row for UPDATE.
+
+#                 Priority:
+#                 1. Exact combination
+#                 2. Same version + section + subsection + question
+#                 -> allows grade to be changed
+#                 3. Same version + grade + section + subsection
+#                 -> allows question to be changed
+#                 4. Same version + grade + section
+#                 5. Same version + grade only
+
+#                 IMPORTANT:
+#                 Exact match always has highest priority.
+#                 """
+
+#                 # ==========================================================
+#                 # 1. EXACT MATCH
+#                 # ==========================================================
+
+#                 exact_key = (
+#                     version_id,
+#                     grade_id,
+#                     board,
+#                     section_id,
+#                     subsection_id,
+#                     question_id,
+#                 )
+
+#                 existing_item = existing_blueprints.get(exact_key)
+
+#                 if existing_item:
+#                     return existing_item
+
+
+#                 # ==========================================================
+#                 # 2. GRADE UPDATE
+#                 #
+#                 # Existing:
+#                 # version 1 + grade 25 + section 19 + subsection 29
+#                 #
+#                 # Request:
+#                 # version 1 + grade 29 + section 19 + subsection 29
+#                 #
+#                 # Update grade instead of creating a new row.
+#                 #
+#                 # Only use this when the lower hierarchy matches.
+#                 # ==========================================================
+
+#                 if (
+#                     section_id is not None
+#                     and subsection_id is not None
+#                     and question_id is not None
+#                 ):
+
+#                     for item in existing_blueprint_qs:
+                        
+#                         if item.id in used_blueprint_ids:
+#                             continue
+
+#                         if (
+#                             item.board == board
+#                             and item.section_id == section_id
+#                             and item.subsection_id == subsection_id
+#                             and item.question_id == question_id
+#                         ):
+#                             return item
+
+
+#                 # ==========================================================
+#                 # 3. SUBSECTION UPDATE
+#                 #
+#                 # Existing:
+#                 # version 1 + grade 25 + section 19 + subsection 29
+#                 #
+#                 # Request:
+#                 # version 1 + grade 25 + section 19 + subsection 30
+#                 #
+#                 # This is harder to distinguish from adding a new subsection.
+#                 #
+#                 # Therefore only match an existing subsection-only row.
+#                 # ==========================================================
+
+#                 if (
+#                     section_id is not None
+#                     and subsection_id is not None
+#                     and question_id is None
+#                 ):
+
+#                     for item in existing_blueprint_qs:
+
+#                         if (
+#                             item.grade_id == grade_id
+#                             and item.board == board
+#                             and item.section_id == section_id
+#                             and item.subsection_id is not None
+#                             and item.question_id is None
+#                         ):
+
+#                             return item
+
+
+#                 # ==========================================================
+#                 # 4. SAME GRADE + BOARD + SECTION + SUBSECTION
+#                 # ==========================================================
+
+#                 if section_id is not None and subsection_id is not None:
+
+#                     for item in existing_blueprint_qs:
+
+#                         if (
+#                             item.grade_id == grade_id
+#                             and item.board == board
+#                             and item.section_id == section_id
+#                             and item.subsection_id == subsection_id
+#                             and item.question_id is None
+#                         ):
+#                             return item
+
+
+#                 # ==========================================================
+#                 # 5. SAME GRADE + BOARD + SECTION
+#                 # ==========================================================
+
+#                 if section_id is not None:
+
+#                     for item in existing_blueprint_qs:
+
+#                         if (
+#                             item.grade_id == grade_id
+#                             and item.board == board
+#                             and item.section_id == section_id
+#                             and item.subsection_id is None
+#                             and item.question_id is None
+#                         ):
+#                             return item
+
+
+#                 # ==========================================================
+#                 # 6. SAME GRADE + BOARD ONLY
+#                 # ==========================================================
+
+#                 for item in existing_blueprint_qs:
+
+#                     if (
+#                         item.grade_id == grade_id
+#                         and item.board == board
+#                         and item.section_id is None
+#                         and item.subsection_id is None
+#                         and item.question_id is None
+#                     ):
+#                         return item
+
+
+#                 return None
+
+#             # ==================================================
+#             # GET EMPTY BLUEPRINT RECORDS
+#             # ==================================================
+
+#             empty_blueprints = list(
 #                 AssessmentBlueprintItem.objects.filter(
-#                     assessment_version=version
-#                 ).delete()
+#                     assessment_version_id=version_id,
+#                     grade__isnull=True,
+#                     section__isnull=True,
+#                     subsection__isnull=True,
+#                     question__isnull=True,
+#                 ).order_by("id")
+#             )
+
 
 #             # ==================================================
-#             # STEP 13:
-#             # CREATE NEW BLUEPRINT
+#             # IMPORTANT:
+#             # Keep track of EMPTY ROWS ALREADY CONSUMED
+#             #
+#             # Once an empty row is assigned to Grade 25,
+#             # it must NEVER be reused for Grade 29.
 #             # ==================================================
 
-#             blueprint_objects = []
+#             used_empty_blueprint_ids = set()
+            
+#             used_blueprint_ids = set()
+
 
 #             sequence_no = 1
 
-#             for grade_data in grades_data:
+#             new_blueprint_objects = []
+#             update_blueprint_objects = []
 
-#                 grade = grades[
-#                     grade_data["grade_id"]
-#                 ]
 
-#                 for section_data in grade_data.get(
+#             # ==================================================
+#             # HELPER:
+#             # GET EMPTY BLUEPRINT ONLY ONCE
+#             # ==================================================
+
+#             def get_reusable_empty_blueprint():
+
+#                 for empty_item in empty_blueprints:
+
+#                     if empty_item.id not in used_empty_blueprint_ids:
+
+#                         used_empty_blueprint_ids.add(
+#                             empty_item.id
+#                         )
+
+#                         return empty_item
+
+#                 return None
+
+
+#             # ==================================================
+#             # PROCESS BLUEPRINT ITEMS
+#             # ==================================================
+
+#             for grade_data in blueprint_items:
+
+#                 # ----------------------------------------------
+#                 # GRADE
+#                 # ----------------------------------------------
+
+#                 grade_id = grade_data["grade_id"]
+
+#                 grade = grades[grade_id]
+
+#                 board = grade_data.get(
+#                     "board",
+#                     AssessmentBlueprintItem.Board.ALL
+#                 )
+
+#                 # ----------------------------------------------
+#                 # SECTIONS
+#                 # ----------------------------------------------
+
+#                 sections_data = grade_data.get(
 #                     "sections",
 #                     []
-#                 ):
+#                 )
 
-#                     section = sections[
-#                         section_data["section_id"]
-#                     ]
 
-#                     for subsection_data in (
-#                         section_data.get(
-#                             "subsections",
-#                             []
+#                 # ==================================================
+#                 # CASE 1:
+#                 # ONLY GRADE
+#                 #
+#                 # Example:
+#                 #
+#                 # {
+#                 #     "grade_id": 25,
+#                 #     "board": "ALL",
+#                 #     "sections": []
+#                 # }
+#                 # ==================================================
+
+#                 if not sections_data:
+
+#                     blueprint_key = (
+#                         version_id,
+#                         grade_id,
+#                         board,
+#                         None,
+#                         None,
+#                         None,
+#                     )
+
+
+#                     # ==================================================
+#                     # 1. EXACT EXISTING RECORD
+#                     # ==================================================
+
+#                     existing_item = existing_blueprints.get(
+#                         blueprint_key
+#                     )
+
+
+#                     # ==================================================
+#                     # 2. REUSE ONE EMPTY RECORD
+#                     #
+#                     # ONLY if exact record does not exist.
+#                     # ==================================================
+
+#                     if not existing_item:
+
+#                         existing_item = (
+#                             get_reusable_empty_blueprint()
 #                         )
-#                     ):
 
-#                         subsection = subsections[
-#                             subsection_data[
-#                                 "subsection_id"
-#                             ]
-#                         ]
 
-#                         for question_id in (
-#                             subsection_data.get(
-#                                 "question_ids",
-#                                 []
+#                     # ==================================================
+#                     # EXISTING / EMPTY RECORD -> UPDATE
+#                     # ==================================================
+
+#                     if existing_item:
+
+#                         existing_item.grade = grade
+#                         existing_item.board = board
+#                         existing_item.section = None
+#                         existing_item.subsection = None
+#                         existing_item.question = None
+
+#                         existing_item.sequence_no = sequence_no
+
+#                         existing_item.marks_override = (
+#                             grade_data.get(
+#                                 "marks_override"
 #                             )
-#                         ):
+#                         )
 
-#                             blueprint_objects.append(
+#                         existing_item.negative_marks_override = (
+#                             grade_data.get(
+#                                 "negative_marks_override"
+#                             )
+#                         )
 
+#                         existing_item.status = blueprint_status
+
+#                         update_blueprint_objects.append(
+#                             existing_item
+#                         )
+
+#                         # ------------------------------------------
+#                         # VERY IMPORTANT
+#                         #
+#                         # Add the updated record into the dictionary.
+#                         #
+#                         # This prevents another request item from
+#                         # accidentally selecting the same record.
+#                         # ------------------------------------------
+
+#                         existing_blueprints[
+#                             blueprint_key
+#                         ] = existing_item
+
+
+#                     # ==================================================
+#                     # NO EMPTY RECORD LEFT -> CREATE NEW
+#                     # ==================================================
+
+#                     else:
+
+#                         new_blueprint_objects.append(
+#                             AssessmentBlueprintItem(
+
+#                                 assessment_version=version,
+
+#                                 grade=grade,
+
+#                                 section=None,
+
+#                                 subsection=None,
+
+#                                 question=None,
+
+#                                 board=board,
+
+#                                 sequence_no=sequence_no,
+
+#                                 marks_override=(
+#                                     grade_data.get(
+#                                         "marks_override"
+#                                     )
+#                                 ),
+
+#                                 negative_marks_override=(
+#                                     grade_data.get(
+#                                         "negative_marks_override"
+#                                     )
+#                                 ),
+
+#                                 status=blueprint_status,
+#                             )
+#                         )
+
+
+#                     sequence_no += 1
+
+#                     continue
+
+
+#                 # ==================================================
+#                 # CASE 2 / 3 / 4:
+#                 #
+#                 # GRADE + SECTION
+#                 # GRADE + SECTION + SUBSECTION
+#                 # GRADE + SECTION + SUBSECTION + QUESTION
+#                 # ==================================================
+
+#                 for section_data in sections_data:
+
+#                     # ==========================================================
+#                     # SECTION
+#                     # ==========================================================
+
+#                     section_id = section_data.get("section_id")
+
+#                     if not section_id:
+#                         continue
+
+#                     section = sections.get(section_id)
+
+#                     if not section:
+#                         return Response(
+#                             {
+#                                 "success": False,
+#                                 "message": f"Section {section_id} not found."
+#                             },
+#                             status=status.HTTP_400_BAD_REQUEST
+#                         )
+
+#                     # ==========================================================
+#                     # CHECK WHETHER SUBSECTIONS WERE SENT
+#                     # ==========================================================
+
+#                     subsections_data = section_data.get("subsections", [])
+
+
+#                     # ==========================================================
+#                     # SECTION ONLY
+#                     #
+#                     # Example:
+#                     #
+#                     # {
+#                     #     "grade_id": 25,
+#                     #     "board": "ALL",
+#                     #     "sections": [
+#                     #         {
+#                     #             "section_id": 19
+#                     #         }
+#                     #     ]
+#                     # }
+#                     #
+#                     # Store:
+#                     #
+#                     # grade = 25
+#                     # section = 19
+#                     # subsection = NULL
+#                     # question = NULL
+#                     # ==========================================================
+
+#                     if not subsections_data:
+
+#                         existing_item = find_existing_blueprint(
+#                             grade_id=grade_id,
+#                             board=board,
+#                             section_id=section_id,
+#                             subsection_id=None,
+#                             question_id=None,
+#                         )
+
+#                         if existing_item:
+                            
+#                             used_blueprint_ids.add(existing_item.id)
+
+#                             # ----------------------------------------------
+#                             # UPDATE EXISTING ROW
+#                             # ----------------------------------------------
+
+#                             existing_item.grade = grade
+#                             existing_item.board = board
+#                             existing_item.section = section
+#                             existing_item.subsection = None
+#                             existing_item.question = None
+
+#                             existing_item.sequence_no = sequence_no
+
+#                             existing_item.marks_override = (
+#                                 section_data.get(
+#                                     "marks_override"
+#                                 )
+#                             )
+
+#                             existing_item.negative_marks_override = (
+#                                 section_data.get(
+#                                     "negative_marks_override"
+#                                 )
+#                             )
+
+#                             # IMPORTANT:
+#                             # draft -> DRAFT
+#                             # publish -> ACTIVE
+#                             existing_item.status = blueprint_status
+
+#                             update_blueprint_objects.append(
+#                                 existing_item
+#                             )
+
+#                         else:
+
+#                             # ----------------------------------------------
+#                             # CREATE ONLY IF SAME GRADE/SECTION DOES NOT EXIST
+#                             # ----------------------------------------------
+
+#                             new_blueprint_objects.append(
 #                                 AssessmentBlueprintItem(
-
 #                                     assessment_version=version,
 
 #                                     grade=grade,
 
+#                                     board=board,
+
 #                                     section=section,
 
-#                                     subsection=subsection,
+#                                     subsection=None,
 
-#                                     question=questions[
-#                                         question_id
-#                                     ],
-
-#                                     board=(
-#                                         request.data.get(
-#                                             "board",
-#                                             AssessmentBlueprintItem
-#                                             .Board.ALL
-#                                         )
-#                                     ),
+#                                     question=None,
 
 #                                     sequence_no=sequence_no,
 
-#                                     status=(
-#                                         AssessmentBlueprintItem
-#                                         .Status.ACTIVE
-#                                     )
+#                                     marks_override=(
+#                                         section_data.get(
+#                                             "marks_override"
+#                                         )
+#                                     ),
+
+#                                     negative_marks_override=(
+#                                         section_data.get(
+#                                             "negative_marks_override"
+#                                         )
+#                                     ),
+
+#                                     status=blueprint_status,
 #                                 )
 #                             )
 
+#                         sequence_no += 1
+
+#                         continue
+                    
+                    
+#                     # ==========================================================
+#                     # SUBSECTION / QUESTION LEVEL
+#                     # ==========================================================
+
+#                     for subsection_data in subsections_data:
+
+#                         subsection_id = subsection_data.get(
+#                             "subsection_id"
+#                         )
+
+#                         if not subsection_id:
+#                             continue
+
+#                         subsection = subsections.get(
+#                             subsection_id
+#                         )
+
+#                         if not subsection:
+#                             return Response(
+#                                 {
+#                                     "success": False,
+#                                     "message": (
+#                                         f"SubSection "
+#                                         f"{subsection_id} not found."
+#                                     )
+#                                 },
+#                                 status=status.HTTP_400_BAD_REQUEST
+#                             )
+
+#                         question_list = subsection_data.get(
+#                             "question_ids",
+#                             []
+#                         )
+
+#                         # ======================================================
+#                         # SUBSECTION ONLY
+#                         # ======================================================
+
+#                         if not question_list:
+
+#                             subsection_key = (
+#                                 version_id,
+#                                 grade_id,
+#                                 board,
+#                                 section_id,
+#                                 subsection_id,
+#                                 None,
+#                             )
+
+#                             existing_item = existing_blueprints.get(
+#                                 subsection_key
+#                             )
+
+#                             # --------------------------------------------------
+#                             # 1. EXISTING EXACT SUBSECTION
+#                             # --------------------------------------------------
+
+#                             if existing_item:
+                                
+#                                 used_blueprint_ids.add(existing_item.id)
+
+#                                 existing_item.grade = grade
+#                                 existing_item.board = board
+#                                 existing_item.section = section
+#                                 existing_item.subsection = subsection
+#                                 existing_item.question = None
+
+#                                 existing_item.sequence_no = sequence_no
+
+#                                 existing_item.marks_override = (
+#                                     subsection_data.get("marks_override")
+#                                 )
+
+#                                 existing_item.negative_marks_override = (
+#                                     subsection_data.get("negative_marks_override")
+#                                 )
+
+#                                 existing_item.status = blueprint_status
+
+#                                 update_blueprint_objects.append(
+#                                     existing_item
+#                                 )
+
+#                             # --------------------------------------------------
+#                             # 2. EXISTING SECTION-ONLY RECORD
+#                             # --------------------------------------------------
+
+#                             if not existing_item:
+
+#                                 section_key = (
+#                                     version_id,
+#                                     grade_id,
+#                                     board,
+#                                     section_id,
+#                                     None,
+#                                     None,
+#                                 )
+
+#                                 existing_item = existing_blueprints.get(
+#                                     section_key
+#                                 )
+
+#                                 if existing_item:
+
+#                                     existing_blueprints.pop(
+#                                         section_key,
+#                                         None
+#                                     )
+
+#                             # --------------------------------------------------
+#                             # 3. EXISTING GRADE-ONLY RECORD
+#                             #
+#                             # Example:
+#                             #
+#                             # Existing:
+#                             # grade = 25
+#                             # board = CBSE
+#                             # section = NULL
+#                             # subsection = NULL
+#                             # question = NULL
+#                             #
+#                             # Request:
+#                             # grade = 25
+#                             # board = CBSE
+#                             # section = 19
+#                             # subsection = 30
+#                             #
+#                             # Reuse the existing record.
+#                             # --------------------------------------------------
+
+#                             if not existing_item:
+
+#                                 grade_only_key = (
+#                                     version_id,
+#                                     grade_id,
+#                                     board,
+#                                     None,
+#                                     None,
+#                                     None,
+#                                 )
+
+#                                 existing_item = existing_blueprints.get(
+#                                     grade_only_key
+#                                 )
+
+#                                 if existing_item:
+
+#                                     existing_blueprints.pop(
+#                                         grade_only_key,
+#                                         None
+#                                     )
+
+#                             # --------------------------------------------------
+#                             # 4. EXISTING GRADE-ONLY RECORD WITH DIFFERENT BOARD
+#                             #
+#                             # USE THIS ONLY IF:
+#                             # one blueprint per grade is allowed and board can
+#                             # be changed from ALL -> CBSE or CBSE -> ALL.
+#                             # --------------------------------------------------
+
+#                             if not existing_item:
+
+#                                 for item in existing_blueprint_qs:
+
+#                                     if (
+#                                         item.grade_id == grade_id
+#                                         and item.section_id is None
+#                                         and item.subsection_id is None
+#                                         and item.question_id is None
+#                                     ):
+
+#                                         existing_item = item
+
+#                                         existing_blueprints.pop(
+#                                             (
+#                                                 version_id,
+#                                                 item.grade_id,
+#                                                 item.board,
+#                                                 None,
+#                                                 None,
+#                                                 None,
+#                                             ),
+#                                             None
+#                                         )
+
+#                                         break
+
+#                             # --------------------------------------------------
+#                             # 5. REUSE EMPTY RECORD
+#                             # --------------------------------------------------
+
+#                             if not existing_item:
+
+#                                 existing_item = (
+#                                     get_reusable_empty_blueprint()
+#                                 )
+
+#                             # --------------------------------------------------
+#                             # 6. UPDATE EXISTING RECORD
+#                             # --------------------------------------------------
+
+#                             if existing_item:
+                                
+#                                 used_blueprint_ids.add(existing_item.id)
+
+#                                 existing_item.grade = grade
+#                                 existing_item.board = board
+#                                 existing_item.section = section
+#                                 existing_item.subsection = subsection
+#                                 existing_item.question = None
+
+#                                 existing_item.sequence_no = sequence_no
+
+#                                 existing_item.marks_override = (
+#                                     subsection_data.get(
+#                                         "marks_override"
+#                                     )
+#                                 )
+
+#                                 existing_item.negative_marks_override = (
+#                                     subsection_data.get(
+#                                         "negative_marks_override"
+#                                     )
+#                                 )
+
+#                                 existing_item.status = blueprint_status
+
+#                                 update_blueprint_objects.append(
+#                                     existing_item
+#                                 )
+
+#                                 # Add new key
+#                                 existing_blueprints[
+#                                     subsection_key
+#                                 ] = existing_item
+
+#                             # --------------------------------------------------
+#                             # 7. CREATE ONLY IF NOTHING EXISTS
+#                             # --------------------------------------------------
+
+#                             else:
+
+#                                 new_blueprint_objects.append(
+#                                     AssessmentBlueprintItem(
+#                                         assessment_version=version,
+#                                         grade=grade,
+#                                         board=board,
+#                                         section=section,
+#                                         subsection=subsection,
+#                                         question=None,
+#                                         sequence_no=sequence_no,
+
+#                                         marks_override=(
+#                                             subsection_data.get(
+#                                                 "marks_override"
+#                                             )
+#                                         ),
+
+#                                         negative_marks_override=(
+#                                             subsection_data.get(
+#                                                 "negative_marks_override"
+#                                             )
+#                                         ),
+
+#                                         status=blueprint_status,
+#                                     )
+#                                 )
+
 #                             sequence_no += 1
 
+#                             continue
+
+#                         # ======================================================
+#                         # QUESTION LEVEL
+#                         # ======================================================
+
+#                         for question_id in question_list:
+
+#                             question = questions.get(question_id)
+
+#                             if not question:
+#                                 return Response(
+#                                     {
+#                                         "success": False,
+#                                         "message": f"Question {question_id} not found."
+#                                     },
+#                                     status=status.HTTP_400_BAD_REQUEST
+#                                 )
+
+#                             question_key = (
+#                                 version_id,
+#                                 grade_id,
+#                                 board,
+#                                 section_id,
+#                                 subsection_id,
+#                                 question_id,
+#                             )
+
+#                             # ==================================================
+#                             # 1. EXACT QUESTION RECORD
+#                             # ==================================================
+
+#                             existing_item = existing_blueprints.get(
+#                                 question_key
+#                             )
+                            
+#                             # ==================================================
+#                             # 1A. UPDATE EXISTING RECORD WHEN GRADE CHANGES
+#                             #
+#                             # Existing:
+#                             # version 1
+#                             # grade 25
+#                             # section 19
+#                             # subsection 29
+#                             # question 20
+#                             #
+#                             # Request:
+#                             # version 1
+#                             # grade 29
+#                             # section 19
+#                             # subsection 29
+#                             # question 20
+#                             #
+#                             # Same hierarchy -> update grade.
+#                             # ==================================================
+
+#                             if not existing_item:
+
+#                                 for item in existing_blueprint_qs:
+
+#                                     if (
+#                                         item.section_id == section_id
+#                                         and item.subsection_id == subsection_id
+#                                         and item.question_id == question_id
+#                                         and item.board == board
+#                                     ):
+#                                         existing_item = item
+
+#                                         # Remove old dictionary key
+#                                         existing_blueprints.pop(
+#                                             (
+#                                                 version_id,
+#                                                 item.grade_id,
+#                                                 item.board,
+#                                                 item.section_id,
+#                                                 item.subsection_id,
+#                                                 item.question_id,
+#                                             ),
+#                                             None
+#                                         )
+
+#                                         break
+
+#                             # ==================================================
+#                             # 2. EXISTING SUBSECTION-ONLY RECORD
+#                             # ==================================================
+
+#                             if not existing_item:
+
+#                                 subsection_key = (
+#                                     version_id,
+#                                     grade_id,
+#                                     board,
+#                                     section_id,
+#                                     subsection_id,
+#                                     None,
+#                                 )
+
+#                                 existing_subsection_item = (
+#                                     existing_blueprints.get(
+#                                         subsection_key
+#                                     )
+#                                 )
+
+#                                 if existing_subsection_item:
+
+#                                     existing_item = existing_subsection_item
+
+#                                     existing_blueprints.pop(
+#                                         subsection_key,
+#                                         None
+#                                     )
+
+#                             # ==================================================
+#                             # 3. EXISTING SECTION-ONLY RECORD
+#                             # ==================================================
+
+#                             if not existing_item:
+
+#                                 section_key = (
+#                                     version_id,
+#                                     grade_id,
+#                                     board,
+#                                     section_id,
+#                                     None,
+#                                     None,
+#                                 )
+
+#                                 existing_section_item = (
+#                                     existing_blueprints.get(
+#                                         section_key
+#                                     )
+#                                 )
+
+#                                 if existing_section_item:
+
+#                                     existing_item = existing_section_item
+
+#                                     existing_blueprints.pop(
+#                                         section_key,
+#                                         None
+#                                     )
+
+#                             # ==================================================
+#                             # 4. EXISTING GRADE-ONLY RECORD
+#                             #
+#                             # THIS IS THE IMPORTANT FIX
+#                             #
+#                             # Existing:
+#                             #
+#                             # Grade 11
+#                             # Board CBSE
+#                             # Section NULL
+#                             # SubSection NULL
+#                             # Question NULL
+#                             #
+#                             # Request:
+#                             #
+#                             # Grade 11
+#                             # Board CBSE
+#                             # Section Aptitude
+#                             # SubSection Logical Reasoning
+#                             # Question 1
+#                             #
+#                             # Reuse the existing grade-only row.
+#                             # ==================================================
+
+#                             if not existing_item:
+
+#                                 grade_only_key = (
+#                                     version_id,
+#                                     grade_id,
+#                                     board,
+#                                     None,
+#                                     None,
+#                                     None,
+#                                 )
+
+#                                 existing_grade_item = (
+#                                     existing_blueprints.get(
+#                                         grade_only_key
+#                                     )
+#                                 )
+
+#                                 if existing_grade_item:
+
+#                                     existing_item = existing_grade_item
+
+#                                     existing_blueprints.pop(
+#                                         grade_only_key,
+#                                         None
+#                                     )
+
+#                             # ==================================================
+#                             # 5. REUSE EMPTY RECORD
+#                             # ==================================================
+
+#                             if not existing_item:
+
+#                                 existing_item = (
+#                                     get_reusable_empty_blueprint()
+#                                 )
+
+#                             # ==================================================
+#                             # 6. UPDATE EXISTING RECORD
+#                             # ==================================================
+
+#                             if existing_item:
+                                
+#                                 used_blueprint_ids.add(existing_item.id)
+
+#                                 existing_item.grade = grade
+#                                 existing_item.board = board
+#                                 existing_item.section = section
+#                                 existing_item.subsection = subsection
+#                                 existing_item.question = question
+
+#                                 existing_item.sequence_no = sequence_no
+
+#                                 existing_item.marks_override = (
+#                                     subsection_data.get(
+#                                         "marks_override"
+#                                     )
+#                                 )
+
+#                                 existing_item.negative_marks_override = (
+#                                     subsection_data.get(
+#                                         "negative_marks_override"
+#                                     )
+#                                 )
+
+#                                 # IMPORTANT:
+#                                 # draft  -> DRAFT
+#                                 # publish -> ACTIVE
+#                                 existing_item.status = blueprint_status
+
+#                                 update_blueprint_objects.append(
+#                                     existing_item
+#                                 )
+
+#                                 # Add the NEW combination to dictionary
+#                                 existing_blueprints[
+#                                     question_key
+#                                 ] = existing_item
+
+#                             # ==================================================
+#                             # 7. CREATE ONLY IF NOTHING EXISTS
+#                             # ==================================================
+
+#                             else:
+
+#                                 new_blueprint_objects.append(
+#                                     AssessmentBlueprintItem(
+#                                         assessment_version=version,
+#                                         grade=grade,
+#                                         board=board,
+#                                         section=section,
+#                                         subsection=subsection,
+#                                         question=question,
+#                                         sequence_no=sequence_no,
+
+#                                         marks_override=(
+#                                             subsection_data.get(
+#                                                 "marks_override"
+#                                             )
+#                                         ),
+
+#                                         negative_marks_override=(
+#                                             subsection_data.get(
+#                                                 "negative_marks_override"
+#                                             )
+#                                         ),
+
+#                                         status=blueprint_status,
+#                                     )
+#                                 )
+
+#                             sequence_no += 1
+            
+            
 #             # ==================================================
-#             # STEP 14: BULK CREATE
+#             # STEP 12:
+#             # BULK CREATE NEW RECORDS
 #             # ==================================================
 
-#             if blueprint_objects:
+#             if new_blueprint_objects:
 
 #                 AssessmentBlueprintItem.objects.bulk_create(
-#                     blueprint_objects,
+#                     new_blueprint_objects,
+#                     batch_size=500
+#                 )
+
+
+#             # ==================================================
+#             # STEP 13:
+#             # BULK UPDATE EXISTING RECORDS
+#             # ==================================================
+
+#             if update_blueprint_objects:
+
+#                 AssessmentBlueprintItem.objects.bulk_update(
+#                     update_blueprint_objects,
+#                     fields=[
+#                         "grade",
+#                         "board",
+#                         "section",
+#                         "subsection",
+#                         "question",
+#                         "sequence_no",
+#                         "marks_override",
+#                         "negative_marks_override",
+#                         "status",
+#                     ],
 #                     batch_size=500
 #                 )
 
 #             # ==================================================
-#             # STEP 15: UPDATE VERSION COUNTS
+#             # STEP 14: UPDATE VERSION COUNTS
 #             # ==================================================
 
 #             blueprint_qs = (
@@ -4359,16 +5895,12 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #                     "updated_at",
 #                 ]
 #             )
-            
+
 #             # ==================================================
-#             # STEP 16: PUBLISH ASSESSMENT
+#             # STEP 15: PUBLISH
 #             # ==================================================
 
 #             if not is_draft:
-
-#                 # ----------------------------------------------
-#                 # Validate blueprint exists
-#                 # ----------------------------------------------
 
 #                 blueprint_exists = (
 #                     AssessmentBlueprintItem.objects
@@ -4392,11 +5924,6 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #                         status=status.HTTP_400_BAD_REQUEST
 #                     )
 
-#                 # ----------------------------------------------
-#                 # Update Assessment Version
-#                 # DRAFT -> PUBLISHED
-#                 # ----------------------------------------------
-
 #                 version.status = (
 #                     AssessmentVersion.Status.PUBLISHED
 #                 )
@@ -4418,11 +5945,6 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #                     ]
 #                 )
 
-#                 # ----------------------------------------------
-#                 # Update Assessment
-#                 # DRAFT -> ACTIVE
-#                 # ----------------------------------------------
-
 #                 assessment = version.assessment
 
 #                 assessment.status = (
@@ -4437,8 +5959,74 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #                 )
 
 #             # ==================================================
-#             # STEP 17: RESPONSE
+#             # STEP 16: RESPONSE
 #             # ==================================================
+
+#             # --------------------------------------------------
+#             # Build response blueprint with question details
+#             # --------------------------------------------------
+
+#             response_blueprint = []
+
+#             for grade_data in blueprint_items:
+
+#                 grade_response = {
+#                     "grade_id": grade_data.get("grade_id"),
+#                     "board": grade_data.get("board"),
+#                     "sections": []
+#                 }
+
+#                 for section_data in grade_data.get("sections", []):
+
+#                     section_response = {
+#                         "section_id": section_data.get("section_id"),
+#                         "subsections": []
+#                     }
+
+#                     for subsection_data in section_data.get(
+#                         "subsections",
+#                         []
+#                     ):
+
+#                         question_details = []
+
+#                         for question_id in subsection_data.get(
+#                             "question_ids",
+#                             []
+#                         ):
+
+#                             question = questions.get(question_id)
+
+#                             question_details.append(
+#                                 {
+#                                     "id": question_id,
+#                                     "question_text": (
+#                                         question.question_text
+#                                         if question
+#                                         else None
+#                                     )
+#                                 }
+#                             )
+
+#                         subsection_response = {
+#                             "subsection_id": subsection_data.get(
+#                                 "subsection_id"
+#                             ),
+#                             "questions": question_details
+#                         }
+
+#                         section_response["subsections"].append(
+#                             subsection_response
+#                         )
+
+#                     grade_response["sections"].append(
+#                         section_response
+#                     )
+
+#                 response_blueprint.append(
+#                     grade_response
+#                 )
+
 
 #             return Response(
 #                 {
@@ -4478,9 +6066,10 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #                                 version.total_marks,
 #                         },
 
-#                         "blueprint": grades_data
+#                         "blueprint": response_blueprint
 #                     }
 #                 },
+
 #                 status=status.HTTP_200_OK
 #             )
 
@@ -4489,12 +6078,15 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #             return Response(
 #                 {
 #                     "success": False,
+
 #                     "message": (
 #                         "Blueprint could not be updated "
 #                         "because of a database constraint."
 #                     ),
+
 #                     "error": str(exc)
 #                 },
+
 #                 status=status.HTTP_400_BAD_REQUEST
 #             )
 
@@ -4503,14 +6095,1906 @@ class AssessmentBlueprintDraftDetailAPIView(APIView):
 #             return Response(
 #                 {
 #                     "success": False,
+
 #                     "message": (
 #                         "Something went wrong while "
 #                         "updating the blueprint."
 #                     ),
+
 #                     "error": str(exc)
 #                 },
+
 #                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
 #             )
+
+
+# ++++++++++++++++++++++++++++++++++++++ Corretly working code for the above snippet is below:
+
+
+# class AssessmentBlueprintItemUpdateAPIView(APIView):
+#     """
+#     Update complete Assessment Blueprint for an Assessment Version.
+
+#     PUT /api/assessment-builder/blueprint/<version_id>/
+#     """
+
+#     @transaction.atomic
+#     def put(self, request, version_id):
+
+#         try:
+
+#             # ==================================================
+#             # STEP 1: GET ASSESSMENT VERSION
+#             # ==================================================
+
+#             version = (
+#                 AssessmentVersion.objects
+#                 .select_for_update()
+#                 .filter(id=version_id)
+#                 .first()
+#             )
+
+#             if not version:
+
+#                 return Response(
+#                     {
+#                         "success": False,
+#                         "message": "Assessment version not found."
+#                     },
+#                     status=status.HTTP_404_NOT_FOUND
+#                 )
+                
+#             # ==================================================
+#             # STEP 1A: GET / CREATE ASSESSMENT
+#             #
+#             # assessment.name can be:
+#             #
+#             # "1"                    -> Existing Assessment ID 1
+#             # "Aptitude Assessment"  -> Assessment name
+#             # ==================================================
+
+#             assessment_data = request.data.get(
+#                 "assessment"
+#             )
+
+#             if not assessment_data:
+
+#                 return Response(
+#                     {
+#                         "success": False,
+#                         "message": "Assessment data is required."
+#                     },
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+
+#             assessment_name = assessment_data.get(
+#                 "name"
+#             )
+
+#             if not assessment_name:
+
+#                 return Response(
+#                     {
+#                         "success": False,
+#                         "message": (
+#                             "Assessment name or ID is required."
+#                         )
+#                     },
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+
+#             assessment_name = str(
+#                 assessment_name
+#             ).strip()
+
+
+#             # ==================================================
+#             # CASE 1:
+#             # name = "1"
+#             #
+#             # Treat as existing Assessment ID
+#             # ==================================================
+
+#             if assessment_name.isdigit():
+
+#                 assessment_id = int(
+#                     assessment_name
+#                 )
+
+#                 assessment = (
+#                     Assessment.objects
+#                     .filter(
+#                         id=assessment_id
+#                     )
+#                     .first()
+#                 )
+
+#                 if not assessment:
+
+#                     return Response(
+#                         {
+#                             "success": False,
+#                             "message": (
+#                                 f"Assessment with ID "
+#                                 f"{assessment_id} not found."
+#                             )
+#                         },
+#                         status=status.HTTP_400_BAD_REQUEST
+#                     )
+
+
+#             # ==================================================
+#             # CASE 2:
+#             # name = "Aptitude Assessment"
+#             #
+#             # Find existing or create new Assessment
+#             # ==================================================
+
+#             else:
+
+#                 assessment_type = assessment_data.get(
+#                     "assessment_type"
+#                 )
+
+#                 if not assessment_type:
+
+#                     return Response(
+#                         {
+#                             "success": False,
+#                             "message": (
+#                                 "assessment_type is required "
+#                                 "when creating a new assessment."
+#                             )
+#                         },
+#                         status=status.HTTP_400_BAD_REQUEST
+#                     )
+
+#                 assessment, created = (
+#                     Assessment.objects.get_or_create(
+#                         name=assessment_name,
+#                         defaults={
+#                             "short_name": assessment_data.get(
+#                                 "short_name",
+#                                 ""
+#                             ),
+#                             "assessment_type": assessment_type,
+#                             "description": assessment_data.get(
+#                                 "description"
+#                             ),
+#                             "default_language": assessment_data.get(
+#                                 "default_language",
+#                                 "en"
+#                             ),
+#                         }
+#                     )
+#                 )
+
+#                 # ----------------------------------------------
+#                 # Update existing assessment fields
+#                 # ----------------------------------------------
+
+#                 if not created:
+
+#                     update_fields = []
+
+#                     for field in [
+#                         "short_name",
+#                         "assessment_type",
+#                         "description",
+#                         "default_language",
+#                     ]:
+
+#                         value = assessment_data.get(
+#                             field
+#                         )
+
+#                         if value is not None:
+
+#                             setattr(
+#                                 assessment,
+#                                 field,
+#                                 value
+#                             )
+
+#                             update_fields.append(
+#                                 field
+#                             )
+
+#                     if update_fields:
+
+#                         assessment.save(
+#                             update_fields=update_fields
+#                         )
+
+
+#             # ==================================================
+#             # STEP 1B:
+#             # Attach Assessment to this Version
+#             #
+#             # ALSO UPDATE VERSION FIELDS IF SENT
+#             # ==================================================
+
+#             version_update_fields = []
+
+#             # --------------------------------------------------
+#             # Attach Assessment
+#             # --------------------------------------------------
+
+#             if version.assessment_id != assessment.id:
+
+#                 version.assessment = assessment
+
+#                 version_update_fields.append(
+#                     "assessment"
+#                 )
+
+
+#             # --------------------------------------------------
+#             # Update Assessment Version fields
+#             #
+#             # Only update fields that are provided.
+#             # Existing logic is not changed.
+#             # --------------------------------------------------
+
+#             version_data = request.data.get(
+#                 "version"
+#             )
+
+#             if version_data:
+
+#                 version_field_mapping = {
+#                     "version_number": "version_number",
+#                     "version_name": "version_name",
+#                     "report_template_id": "report_template",
+#                     "release_date": "release_date",
+#                     "effective_from": "effective_from",
+#                     "effective_to": "effective_to",
+#                     "duration_minutes": "duration_minutes",
+#                     "allow_resume": "allow_resume",
+#                     "allow_review": "allow_review",
+#                     "randomize_sections": "randomize_sections",
+#                     "show_result_immediately": "show_result_immediately",
+#                     "instructions": "instructions",
+#                 }
+
+#                 for request_field, model_field in version_field_mapping.items():
+
+#                     if request_field not in version_data:
+#                         continue
+
+#                     value = version_data.get(
+#                         request_field
+#                     )
+
+#                     # ----------------------------------------------
+#                     # Foreign Key: report_template_id
+#                     # ----------------------------------------------
+
+#                     if request_field == "report_template_id":
+
+#                         if value is not None:
+
+#                             report_template = (
+#                                 ReportTemplate.objects
+#                                 .filter(id=value)
+#                                 .first()
+#                             )
+
+#                             if not report_template:
+
+#                                 return Response(
+#                                     {
+#                                         "success": False,
+#                                         "message": (
+#                                             f"Report template with ID "
+#                                             f"{value} not found."
+#                                         )
+#                                     },
+#                                     status=status.HTTP_400_BAD_REQUEST
+#                                 )
+
+#                             version.report_template = (
+#                                 report_template
+#                             )
+
+#                             version_update_fields.append(
+#                                 "report_template"
+#                             )
+
+#                         else:
+
+#                             version.report_template = None
+
+#                             version_update_fields.append(
+#                                 "report_template"
+#                             )
+
+#                     # ----------------------------------------------
+#                     # Normal fields
+#                     # ----------------------------------------------
+
+#                     else:
+
+#                         setattr(
+#                             version,
+#                             model_field,
+#                             value
+#                         )
+
+#                         version_update_fields.append(
+#                             model_field
+#                         )
+
+
+#             # --------------------------------------------------
+#             # Save Version
+#             # --------------------------------------------------
+
+#             if version_update_fields:
+
+#                 version_update_fields.append(
+#                     "updated_at"
+#                 )
+
+#                 version.save(
+#                     update_fields=list(
+#                         set(version_update_fields)
+#                     )
+#                 )
+    
+#             # ==================================================
+#             # STEP 2: CHECK VERSION STATUS
+#             # ==================================================
+
+#             if (
+#                 version.status
+#                 == AssessmentVersion.Status.PUBLISHED
+#             ):
+
+#                 return Response(
+#                     {
+#                         "success": False,
+#                         "message": (
+#                             "Published assessment version "
+#                             "cannot be modified."
+#                         )
+#                     },
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+
+#             # ==================================================
+#             # STEP 3: GET INPUT
+#             # ==================================================
+
+#             blueprint_items = request.data.get(
+#                 "blueprint_items"
+#             )
+
+#             is_draft = request.data.get(
+#                 "is_draft",
+#                 True
+#             )
+            
+#             blueprint_status = (
+#                 AssessmentBlueprintItem.Status.DRAFT
+#                 if is_draft
+#                 else AssessmentBlueprintItem.Status.ACTIVE
+#             )
+
+#             # --------------------------------------------------
+#             # If blueprint_items are not provided
+#             # --------------------------------------------------
+#             #
+#             # Draft:
+#             #     Allow update without blueprint_items.
+#             #
+#             # Publish:
+#             #     blueprint_items are required.
+#             # --------------------------------------------------
+
+#             if not blueprint_items:
+
+#                 if not is_draft:
+
+#                     return Response(
+#                         {
+#                             "success": False,
+#                             "message": (
+#                                 "blueprint_items is required "
+#                                 "when publishing."
+#                             )
+#                         },
+#                         status=status.HTTP_400_BAD_REQUEST
+#                     )
+
+#                 # --------------------------------------------------
+#                 # Draft update without blueprint
+#                 #
+#                 # Do not change existing blueprint.
+#                 # Simply continue and return success.
+#                 # --------------------------------------------------
+
+#                 return Response(
+#                     {
+#                         "success": True,
+
+#                         "message": (
+#                             "Assessment draft updated successfully."
+#                         ),
+
+#                         "data": {
+#                             "assessment_version": {
+#                                 "id": version.id,
+
+#                                 "public_id": str(
+#                                     version.public_id
+#                                 ),
+
+#                                 "version_number":
+#                                     version.version_number,
+
+#                                 "status":
+#                                     version.status,
+
+#                                 "total_sections":
+#                                     version.total_sections,
+
+#                                 "total_subsections":
+#                                     version.total_subsections,
+
+#                                 "total_questions":
+#                                     version.total_questions,
+
+#                                 "total_marks":
+#                                     version.total_marks,
+#                             },
+
+#                             "blueprint": None
+#                         }
+#                     },
+#                     status=status.HTTP_200_OK
+#                 )
+
+#             # ==================================================
+#             # STEP 4: PUBLISH VALIDATION
+#             # ==================================================
+
+#             if not is_draft:
+
+#                 for grade_data in blueprint_items:
+
+#                     # ------------------------------------------
+#                     # GRADE
+#                     # ------------------------------------------
+
+#                     if not grade_data.get("grade_id"):
+
+#                         return Response(
+#                             {
+#                                 "success": False,
+#                                 "message": (
+#                                     "Grade ID is required "
+#                                     "when publishing."
+#                                 )
+#                             },
+#                             status=status.HTTP_400_BAD_REQUEST
+#                         )
+
+#                     # ------------------------------------------
+#                     # BOARD
+#                     # ------------------------------------------
+
+#                     if not grade_data.get("board"):
+
+#                         return Response(
+#                             {
+#                                 "success": False,
+#                                 "message": (
+#                                     "Board is required "
+#                                     "when publishing."
+#                                 )
+#                             },
+#                             status=status.HTTP_400_BAD_REQUEST
+#                         )
+
+#                     # ------------------------------------------
+#                     # SECTIONS
+#                     # ------------------------------------------
+
+#                     if not grade_data.get("sections"):
+
+#                         return Response(
+#                             {
+#                                 "success": False,
+#                                 "message": (
+#                                     "Sections are required "
+#                                     "when publishing."
+#                                 )
+#                             },
+#                             status=status.HTTP_400_BAD_REQUEST
+#                         )
+
+#                     for section_data in grade_data["sections"]:
+
+#                         # --------------------------------------
+#                         # SUBSECTIONS
+#                         # --------------------------------------
+
+#                         if not section_data.get("subsections"):
+
+#                             return Response(
+#                                 {
+#                                     "success": False,
+#                                     "message": (
+#                                         "SubSections are required "
+#                                         "when publishing."
+#                                     )
+#                                 },
+#                                 status=status.HTTP_400_BAD_REQUEST
+#                             )
+
+#                         for subsection_data in section_data[
+#                             "subsections"
+#                         ]:
+
+#                             # ----------------------------------
+#                             # QUESTIONS
+#                             # ----------------------------------
+
+#                             questions_data = subsection_data.get("questions", [])
+
+#                             # Questions must exist
+#                             if not isinstance(questions_data, list) or not questions_data:
+
+#                                 return Response(
+#                                     {
+#                                         "success": False,
+#                                         "message": (
+#                                             "Question IDs are required "
+#                                             "when publishing."
+#                                         )
+#                                     },
+#                                     status=status.HTTP_400_BAD_REQUEST
+#                                 )
+
+#                             # Every question must contain question_id
+#                             for question_item in questions_data:
+
+#                                 if not isinstance(question_item, dict):
+
+#                                     return Response(
+#                                         {
+#                                             "success": False,
+#                                             "message": (
+#                                                 "Each question must contain "
+#                                                 "question_id when publishing."
+#                                             )
+#                                         },
+#                                         status=status.HTTP_400_BAD_REQUEST
+#                                     )
+
+#                                 question_id = question_item.get("question_id")
+
+#                                 if question_id is None or question_id == "":
+
+#                                     return Response(
+#                                         {
+#                                             "success": False,
+#                                             "message": (
+#                                                 "Question ID is required "
+#                                                 "when publishing."
+#                                             )
+#                                         },
+#                                         status=status.HTTP_400_BAD_REQUEST
+#                                     )
+
+#             # ==================================================
+#             # STEP 5: COLLECT IDS
+#             # ==================================================
+
+#             grade_ids = set()
+#             section_ids = set()
+#             subsection_ids = set()
+#             question_ids = set()
+
+#             for grade_data in blueprint_items:
+
+#                 grade_id = grade_data.get("grade_id")
+
+#                 if grade_id:
+#                     grade_ids.add(grade_id)
+
+#                 for section_data in grade_data.get(
+#                     "sections",
+#                     []
+#                 ):
+
+#                     section_id = section_data.get(
+#                         "section_id"
+#                     )
+
+#                     if section_id:
+#                         section_ids.add(section_id)
+
+#                     for subsection_data in section_data.get(
+#                         "subsections",
+#                         []
+#                     ):
+
+#                         subsection_id = subsection_data.get(
+#                             "subsection_id"
+#                         )
+
+#                         if subsection_id:
+#                             subsection_ids.add(
+#                                 subsection_id
+#                             )
+
+#                         question_ids.update(
+#                             q.get("question_id")
+#                             for q in subsection_data.get("questions", [])
+#                             if isinstance(q, dict) and q.get("question_id")
+#                         )
+
+#             # ==================================================
+#             # STEP 6: FETCH MASTER DATA
+#             # ==================================================
+
+#             grades = {
+#                 obj.id: obj
+#                 for obj in Grade.objects.filter(
+#                     id__in=grade_ids
+#                 )
+#             }
+
+#             sections = {
+#                 obj.id: obj
+#                 for obj in Section.objects.filter(
+#                     id__in=section_ids
+#                 )
+#             }
+
+#             subsections = {
+#                 obj.id: obj
+#                 for obj in SubSection.objects.filter(
+#                     id__in=subsection_ids
+#                 )
+#             }
+
+#             questions = {
+#                 obj.id: obj
+#                 for obj in Question.objects.filter(
+#                     id__in=question_ids
+#                 )
+#             }
+
+#             # ==================================================
+#             # STEP 7: VALIDATE MASTER IDS
+#             # ==================================================
+
+#             missing_grades = (
+#                 grade_ids - set(grades.keys())
+#             )
+
+#             if missing_grades:
+
+#                 return Response(
+#                     {
+#                         "success": False,
+#                         "message": (
+#                             f"Invalid Grade IDs: "
+#                             f"{sorted(missing_grades)}"
+#                         )
+#                     },
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+
+#             missing_sections = (
+#                 section_ids - set(sections.keys())
+#             )
+
+#             if missing_sections:
+
+#                 return Response(
+#                     {
+#                         "success": False,
+#                         "message": (
+#                             f"Invalid Section IDs: "
+#                             f"{sorted(missing_sections)}"
+#                         )
+#                     },
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+
+#             missing_subsections = (
+#                 subsection_ids
+#                 - set(subsections.keys())
+#             )
+
+#             if missing_subsections:
+
+#                 return Response(
+#                     {
+#                         "success": False,
+#                         "message": (
+#                             f"Invalid SubSection IDs: "
+#                             f"{sorted(missing_subsections)}"
+#                         )
+#                     },
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+
+#             missing_questions = (
+#                 question_ids
+#                 - set(questions.keys())
+#             )
+
+#             if missing_questions:
+
+#                 return Response(
+#                     {
+#                         "success": False,
+#                         "message": (
+#                             f"Invalid Question IDs: "
+#                             f"{sorted(missing_questions)}"
+#                         )
+#                     },
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+
+#             # ==================================================
+#             # STEP 8:
+#             # DUPLICATE QUESTION VALIDATION
+#             #
+#             # Same question CAN be used for different grades.
+#             #
+#             # Allowed:
+#             #
+#             # Grade 25 + Section 19 + SubSection 29 + Question 20
+#             # Grade 29 + Section 20 + SubSection 29 + Question 20
+#             #
+#             # Not allowed:
+#             #
+#             # Grade 25 + Section 19 + SubSection 29 + Question 20
+#             # Grade 25 + Section 19 + SubSection 29 + Question 20
+#             # ==================================================
+
+#             assigned_questions = set()
+
+#             for grade_data in blueprint_items:
+
+#                 grade_id = grade_data.get(
+#                     "grade_id"
+#                 )
+
+#                 for section_data in grade_data.get(
+#                     "sections",
+#                     []
+#                 ):
+
+#                     section_id = section_data.get(
+#                         "section_id"
+#                     )
+
+#                     for subsection_data in section_data.get(
+#                         "subsections",
+#                         []
+#                     ):
+
+#                         subsection_id = subsection_data.get(
+#                             "subsection_id"
+#                         )
+
+#                         for question_item in subsection_data.get(
+#                             "questions",
+#                             []
+#                         ):
+#                             question_id = question_item.get("question_id")
+
+#                             if not question_id:
+#                                 continue
+
+#                             assignment_key = (
+#                                 grade_id,
+#                                 section_id,
+#                                 subsection_id,
+#                                 question_id,
+#                             )
+
+#                             if assignment_key in assigned_questions:
+
+#                                 return Response(
+#                                     {
+#                                         "success": False,
+#                                         "message": (
+#                                             f"Question {question_id} "
+#                                             f"is already assigned to "
+#                                             f"Grade {grade_id}, "
+#                                             f"Section {section_id}, "
+#                                             f"SubSection {subsection_id}."
+#                                         )
+#                                     },
+#                                     status=status.HTTP_400_BAD_REQUEST
+#                                 )
+
+#                             assigned_questions.add(
+#                                 assignment_key
+#                             )
+
+#             # ==================================================
+#             # STEP 9:
+#             # VALIDATE HIERARCHY
+#             #
+#             # Question does NOT contain subsection_id.
+#             #
+#             # Relationship:
+#             #
+#             # Grade
+#             #   ↓
+#             # Section
+#             #   ↓
+#             # SubSection
+#             #   ↓
+#             # Blueprint Item
+#             #   ↓
+#             # Question
+#             # ==================================================
+
+#             for grade_data in blueprint_items:
+
+#                 grade_id = grade_data.get("grade_id")
+
+#                 grade = grades.get(grade_id)
+
+#                 if not grade:
+
+#                     return Response(
+#                         {
+#                             "success": False,
+#                             "message": (
+#                                 f"Grade {grade_id} not found."
+#                             )
+#                         },
+#                         status=status.HTTP_400_BAD_REQUEST
+#                     )
+
+#                 # --------------------------------------------------
+#                 # Sections
+#                 # --------------------------------------------------
+
+#                 for section_data in grade_data.get(
+#                     "sections",
+#                     []
+#                 ):
+
+#                     section_id = section_data.get(
+#                         "section_id"
+#                     )
+
+#                     section = sections.get(
+#                         section_id
+#                     )
+
+#                     if not section:
+
+#                         return Response(
+#                             {
+#                                 "success": False,
+#                                 "message": (
+#                                     f"Section {section_id} "
+#                                     f"not found."
+#                                 )
+#                             },
+#                             status=status.HTTP_400_BAD_REQUEST
+#                         )
+
+#                     # --------------------------------------------------
+#                     # SubSections
+#                     # --------------------------------------------------
+
+#                     for subsection_data in section_data.get(
+#                         "subsections",
+#                         []
+#                     ):
+
+#                         subsection_id = subsection_data.get(
+#                             "subsection_id"
+#                         )
+
+#                         subsection = subsections.get(
+#                             subsection_id
+#                         )
+
+#                         if not subsection:
+
+#                             return Response(
+#                                 {
+#                                     "success": False,
+#                                     "message": (
+#                                         f"SubSection "
+#                                         f"{subsection_id} "
+#                                         f"not found."
+#                                     )
+#                                 },
+#                                 status=status.HTTP_400_BAD_REQUEST
+#                             )
+
+#                         # --------------------------------------------------
+#                         # Questions
+#                         #
+#                         # Request format:
+#                         #
+#                         # "questions": [
+#                         #     {"question_id": 37},
+#                         #     {"question_id": 38}
+#                         # ]
+#                         # --------------------------------------------------
+
+#                         questions_data = subsection_data.get("questions", [])
+
+#                         for question_item in questions_data:
+
+#                             if not isinstance(question_item, dict):
+#                                 continue
+
+#                             question_id = question_item.get("question_id")
+
+#                             if not question_id:
+#                                 continue
+
+#                             question = questions.get(question_id)
+
+#                             if not question:
+
+#                                 return Response(
+#                                     {
+#                                         "success": False,
+#                                         "message": (
+#                                             f"Question "
+#                                             f"{question_id} "
+#                                             f"not found."
+#                                         )
+#                                     },
+#                                     status=status.HTTP_400_BAD_REQUEST
+#                                 )
+
+#             # ==================================================
+#             # STEP 10:
+#             # QUESTION -> GRADE MAPPING
+#             # ==================================================
+
+#             question_grade_mappings = set(
+#                 QuestionGradeMapping.objects.filter(
+#                     question_id__in=question_ids,
+#                     grade_id__in=grade_ids,
+#                 ).values_list(
+#                     "question_id",
+#                     "grade_id",
+#                 )
+#             )
+
+#             for grade_data in blueprint_items:
+
+#                 grade_id = grade_data.get(
+#                     "grade_id"
+#                 )
+
+#                 for section_data in grade_data.get(
+#                     "sections",
+#                     []
+#                 ):
+
+#                     for subsection_data in section_data.get(
+#                         "subsections",
+#                         []
+#                     ):
+
+#                         for question_item in subsection_data.get("questions", []):
+
+#                             question_id = question_item.get("question_id")
+
+#                             if not question_id:
+#                                 continue
+
+#                             if (
+#                                 question_id,
+#                                 grade_id
+#                             ) not in question_grade_mappings:
+
+#                                 return Response(
+#                                     {
+#                                         "success": False,
+#                                         "message": (
+#                                             f"Question {question_id} "
+#                                             f"is not mapped to Grade "
+#                                             f"{grade_id}."
+#                                         )
+#                                     },
+#                                     status=status.HTTP_400_BAD_REQUEST
+#                                 )
+
+#            # ==============================================================
+#             # STEP 11:
+#             # SYNC BLUEPRINT ITEMS
+#             #
+#             # RULE:
+#             #
+#             # 1. Exact same hierarchy exists -> UPDATE
+#             # 2. New hierarchy combination -> CREATE
+#             # 3. Existing DB hierarchy not present in request -> DELETE
+#             #
+#             # Example:
+#             #
+#             # OLD:
+#             # Grade 25 + Section 19 + SubSection 29 + Question 20
+#             #
+#             # REQUEST:
+#             # Grade 29 + Section 19 + SubSection 29 + Question 20
+#             #
+#             # RESULT:
+#             #
+#             # DELETE:
+#             # Grade 25 + Section 19 + SubSection 29 + Question 20
+#             #
+#             # CREATE:
+#             # Grade 29 + Section 19 + SubSection 29 + Question 20
+#             #
+#             # ==============================================================
+
+#             existing_blueprint_qs = list(
+#                 AssessmentBlueprintItem.objects
+#                 .filter(
+#                     assessment_version_id=version_id
+#                 )
+#                 .order_by("id")
+#             )
+
+
+#             # ==============================================================
+#             # STEP 11A:
+#             # BUILD EXISTING DB MAP
+#             # ==============================================================
+
+#             existing_map = {}
+
+#             for item in existing_blueprint_qs:
+
+#                 key = (
+#                     item.grade_id,
+#                     item.board,
+#                     item.section_id,
+#                     item.subsection_id,
+#                     item.question_id,
+#                 )
+
+#                 existing_map[key] = item
+
+
+#             # ==============================================================
+#             # STEP 11B:
+#             # FLATTEN REQUEST INTO EXACT COMBINATIONS
+#             # ==============================================================
+
+#             requested_items = []
+
+
+#             for grade_data in blueprint_items:
+
+#                 grade_id = grade_data.get("grade_id")
+
+#                 board = grade_data.get(
+#                     "board",
+#                     AssessmentBlueprintItem.Board.ALL
+#                 )
+
+#                 sections_data = grade_data.get(
+#                     "sections",
+#                     []
+#                 )
+
+
+#                 # ----------------------------------------------------------
+#                 # GRADE ONLY
+#                 # ----------------------------------------------------------
+
+#                 if not sections_data:
+
+#                     requested_items.append({
+#                         "grade_id": grade_id,
+#                         "board": board,
+#                         "section_id": None,
+#                         "subsection_id": None,
+#                         "question_id": None,
+#                         "marks_override": grade_data.get(
+#                             "marks_override"
+#                         ),
+#                         "negative_marks_override": grade_data.get(
+#                             "negative_marks_override"
+#                         ),
+#                     })
+
+#                     continue
+
+
+#                 # ----------------------------------------------------------
+#                 # SECTIONS
+#                 # ----------------------------------------------------------
+
+#                 for section_data in sections_data:
+
+#                     section_id = section_data.get(
+#                         "section_id"
+#                     )
+
+#                     if not section_id:
+#                         continue
+
+
+#                     subsections_data = section_data.get(
+#                         "subsections",
+#                         []
+#                     )
+
+
+#                     # ------------------------------------------------------
+#                     # SECTION ONLY
+#                     # ------------------------------------------------------
+
+#                     if not subsections_data:
+
+#                         requested_items.append({
+#                             "grade_id": grade_id,
+#                             "board": board,
+#                             "section_id": section_id,
+#                             "subsection_id": None,
+#                             "question_id": None,
+#                             "marks_override": section_data.get(
+#                                 "marks_override"
+#                             ),
+#                             "negative_marks_override": section_data.get(
+#                                 "negative_marks_override"
+#                             ),
+#                         })
+
+#                         continue
+
+
+#                     # ------------------------------------------------------
+#                     # SUBSECTIONS
+#                     # ------------------------------------------------------
+
+#                     for subsection_data in subsections_data:
+
+#                         subsection_id = subsection_data.get(
+#                             "subsection_id"
+#                         )
+
+#                         if not subsection_id:
+#                             continue
+
+
+#                         questions_data = subsection_data.get(
+#                             "questions",
+#                             []
+#                         )
+
+
+#                         question_ids_for_subsection = [
+#                             q.get("question_id")
+#                             for q in questions_data
+#                             if isinstance(q, dict)
+#                             and q.get("question_id")
+#                         ]
+
+
+#                         # --------------------------------------------------
+#                         # SUBSECTION ONLY
+#                         # --------------------------------------------------
+
+#                         if not question_ids_for_subsection:
+
+#                             requested_items.append({
+#                                 "grade_id": grade_id,
+#                                 "board": board,
+#                                 "section_id": section_id,
+#                                 "subsection_id": subsection_id,
+#                                 "question_id": None,
+#                                 "marks_override": subsection_data.get(
+#                                     "marks_override"
+#                                 ),
+#                                 "negative_marks_override": subsection_data.get(
+#                                     "negative_marks_override"
+#                                 ),
+#                             })
+
+#                             continue
+
+
+#                         # --------------------------------------------------
+#                         # QUESTION LEVEL
+#                         # --------------------------------------------------
+
+#                         for question_id in question_ids_for_subsection:
+
+#                             requested_items.append({
+#                                 "grade_id": grade_id,
+#                                 "board": board,
+#                                 "section_id": section_id,
+#                                 "subsection_id": subsection_id,
+#                                 "question_id": question_id,
+#                                 "marks_override": subsection_data.get(
+#                                     "marks_override"
+#                                 ),
+#                                 "negative_marks_override": subsection_data.get(
+#                                     "negative_marks_override"
+#                                 ),
+#                             })
+
+
+#             # ==============================================================
+#             # STEP 11C:
+#             # VALIDATE DUPLICATE REQUEST COMBINATIONS
+#             # ==============================================================
+
+#             requested_keys = set()
+
+#             for item_data in requested_items:
+
+#                 key = (
+#                     item_data["grade_id"],
+#                     item_data["board"],
+#                     item_data["section_id"],
+#                     item_data["subsection_id"],
+#                     item_data["question_id"],
+#                 )
+
+#                 if key in requested_keys:
+
+#                     return Response(
+#                         {
+#                             "success": False,
+#                             "message": (
+#                                 "Duplicate blueprint combination found: "
+#                                 f"Grade={item_data['grade_id']}, "
+#                                 f"Board={item_data['board']}, "
+#                                 f"Section={item_data['section_id']}, "
+#                                 f"SubSection={item_data['subsection_id']}, "
+#                                 f"Question={item_data['question_id']}"
+#                             )
+#                         },
+#                         status=status.HTTP_400_BAD_REQUEST
+#                     )
+
+#                 requested_keys.add(key)
+
+
+#             # ==============================================================
+#             # STEP 11D:
+#             # FIND RECORDS THAT MUST BE DELETED
+#             #
+#             # IMPORTANT:
+#             #
+#             # If an old combination is not present in the new PUT request,
+#             # it means the hierarchy was changed or removed.
+#             #
+#             # Therefore DELETE it.
+#             # ==============================================================
+
+#             existing_keys = set(existing_map.keys())
+
+#             keys_to_delete = (
+#                 existing_keys - requested_keys
+#             )
+
+
+#             if keys_to_delete:
+
+#                 ids_to_delete = [
+#                     existing_map[key].id
+#                     for key in keys_to_delete
+#                 ]
+
+#                 AssessmentBlueprintItem.objects.filter(
+#                     id__in=ids_to_delete
+#                 ).delete()
+
+
+#             # ==============================================================
+#             # STEP 11E:
+#             # UPDATE EXISTING EXACT MATCHES
+#             # CREATE NEW COMBINATIONS
+#             # ==============================================================
+
+#             new_blueprint_objects = []
+
+#             update_blueprint_objects = []
+
+#             sequence_no = 1
+
+
+#             for item_data in requested_items:
+
+#                 key = (
+#                     item_data["grade_id"],
+#                     item_data["board"],
+#                     item_data["section_id"],
+#                     item_data["subsection_id"],
+#                     item_data["question_id"],
+#                 )
+
+
+#                 grade = grades.get(
+#                     item_data["grade_id"]
+#                 )
+
+#                 section = sections.get(
+#                     item_data["section_id"]
+#                 )
+
+#                 subsection = subsections.get(
+#                     item_data["subsection_id"]
+#                 )
+
+#                 question = questions.get(
+#                     item_data["question_id"]
+#                 )
+
+
+#                 # ==========================================================
+#                 # EXISTING EXACT COMBINATION
+#                 #
+#                 # ONLY UPDATE
+#                 # ==========================================================
+
+#                 existing_item = existing_map.get(
+#                     key
+#                 )
+
+
+#                 if existing_item:
+
+#                     existing_item.grade = grade
+
+#                     existing_item.board = (
+#                         item_data["board"]
+#                     )
+
+#                     existing_item.section = section
+
+#                     existing_item.subsection = subsection
+
+#                     existing_item.question = question
+
+#                     existing_item.sequence_no = sequence_no
+
+#                     existing_item.marks_override = (
+#                         item_data["marks_override"]
+#                     )
+
+#                     existing_item.negative_marks_override = (
+#                         item_data["negative_marks_override"]
+#                     )
+
+#                     existing_item.status = blueprint_status
+
+#                     update_blueprint_objects.append(
+#                         existing_item
+#                     )
+
+
+#                 # ==========================================================
+#                 # NEW COMBINATION
+#                 #
+#                 # CREATE NEW ROW
+#                 # ==========================================================
+
+#                 else:
+
+#                     new_blueprint_objects.append(
+#                         AssessmentBlueprintItem(
+#                             assessment_version=version,
+
+#                             grade=grade,
+
+#                             board=item_data["board"],
+
+#                             section=section,
+
+#                             subsection=subsection,
+
+#                             question=question,
+
+#                             sequence_no=sequence_no,
+
+#                             marks_override=(
+#                                 item_data["marks_override"]
+#                             ),
+
+#                             negative_marks_override=(
+#                                 item_data[
+#                                     "negative_marks_override"
+#                                 ]
+#                             ),
+
+#                             status=blueprint_status,
+#                         )
+#                     )
+
+
+#                 sequence_no += 1
+
+
+#             # ==============================================================
+#             # STEP 12:
+#             # BULK CREATE
+#             # ==============================================================
+
+#             if new_blueprint_objects:
+
+#                 AssessmentBlueprintItem.objects.bulk_create(
+#                     new_blueprint_objects,
+#                     batch_size=500
+#                 )
+
+
+#             # ==============================================================
+#             # STEP 13:
+#             # BULK UPDATE
+#             # ==============================================================
+
+#             if update_blueprint_objects:
+
+#                 AssessmentBlueprintItem.objects.bulk_update(
+#                     update_blueprint_objects,
+
+#                     fields=[
+#                         "grade",
+#                         "board",
+#                         "section",
+#                         "subsection",
+#                         "question",
+#                         "sequence_no",
+#                         "marks_override",
+#                         "negative_marks_override",
+#                         "status",
+#                     ],
+
+#                     batch_size=500
+#                 )
+                
+#             # ==================================================
+#             # GET SAVED BLUEPRINT IDS
+#             # ==================================================
+
+#             saved_blueprints = (
+#                 AssessmentBlueprintItem.objects
+#                 .filter(
+#                     assessment_version=version
+#                 )
+#                 .select_related(
+#                     "grade",
+#                     "section",
+#                     "subsection",
+#                     "question",
+#                 )
+#             )
+
+#             blueprint_id_map = {}
+
+#             for blueprint_item in saved_blueprints:
+
+#                 key = (
+#                     blueprint_item.grade_id,
+#                     blueprint_item.board,
+#                     blueprint_item.section_id,
+#                     blueprint_item.subsection_id,
+#                     blueprint_item.question_id,
+#                 )
+
+#                 blueprint_id_map[key] = blueprint_item.id
+
+#             # ==================================================
+#             # STEP 14: UPDATE VERSION COUNTS
+#             # ==================================================
+
+#             blueprint_qs = (
+#                 AssessmentBlueprintItem.objects
+#                 .filter(
+#                     assessment_version=version,
+#                     question__isnull=False
+#                 )
+#             )
+
+#             version.total_sections = (
+#                 blueprint_qs
+#                 .values("section_id")
+#                 .distinct()
+#                 .count()
+#             )
+
+#             version.total_subsections = (
+#                 blueprint_qs
+#                 .values("subsection_id")
+#                 .distinct()
+#                 .count()
+#             )
+
+#             version.total_questions = (
+#                 blueprint_qs.count()
+#             )
+
+#             version.total_marks = (
+#                 blueprint_qs
+#                 .aggregate(
+#                     total=Sum("marks_override")
+#                 )["total"]
+#                 or Decimal("0")
+#             )
+
+#             version.save(
+#                 update_fields=[
+#                     "total_sections",
+#                     "total_subsections",
+#                     "total_questions",
+#                     "total_marks",
+#                     "updated_at",
+#                 ]
+#             )
+
+#             # ==================================================
+#             # STEP 15: PUBLISH
+#             # ==================================================
+
+#             if not is_draft:
+
+#                 blueprint_exists = (
+#                     AssessmentBlueprintItem.objects
+#                     .filter(
+#                         assessment_version=version,
+#                         question__isnull=False
+#                     )
+#                     .exists()
+#                 )
+
+#                 if not blueprint_exists:
+
+#                     return Response(
+#                         {
+#                             "success": False,
+#                             "message": (
+#                                 "Cannot publish assessment "
+#                                 "without blueprint questions."
+#                             )
+#                         },
+#                         status=status.HTTP_400_BAD_REQUEST
+#                     )
+
+#                 version.status = (
+#                     AssessmentVersion.Status.PUBLISHED
+#                 )
+
+#                 version.published_by = (
+#                     request.user
+#                     if request.user.is_authenticated
+#                     else None
+#                 )
+
+#                 version.published_at = timezone.now()
+
+#                 version.save(
+#                     update_fields=[
+#                         "status",
+#                         "published_by",
+#                         "published_at",
+#                         "updated_at",
+#                     ]
+#                 )
+
+#                 assessment = version.assessment
+
+#                 assessment.status = (
+#                     Assessment.Status.ACTIVE
+#                 )
+
+#                 assessment.save(
+#                     update_fields=[
+#                         "status",
+#                         "updated_at",
+#                     ]
+#                 )
+
+#            # ==================================================
+#             # STEP 16: RESPONSE
+#             # ==================================================
+
+#             response_blueprint = []
+
+#             for grade_data in blueprint_items:
+
+#                 grade_id = grade_data.get("grade_id")
+
+#                 board = grade_data.get(
+#                     "board",
+#                     AssessmentBlueprintItem.Board.ALL
+#                 )
+
+#                 sections_data = grade_data.get(
+#                     "sections",
+#                     []
+#                 )
+
+#                 # ==================================================
+#                 # CASE 1: ONLY GRADE
+#                 #
+#                 # Grade exists
+#                 # Sections are NOT provided
+#                 # ==================================================
+
+#                 if not sections_data:
+
+#                     grade_blueprint_key = (
+#                         grade_id,
+#                         board,
+#                         None,
+#                         None,
+#                         None,
+#                     )
+
+#                     grade_blueprint_id = blueprint_id_map.get(
+#                         grade_blueprint_key
+#                     )
+
+#                     response_blueprint.append(
+#                         {
+#                             "blueprint_id": grade_blueprint_id,
+#                             "grade_id": grade_id,
+#                             "board": board,
+#                             "sections": []
+#                         }
+#                     )
+
+#                     continue
+
+#                 # ==================================================
+#                 # GRADE + SECTION
+#                 # ==================================================
+
+#                 grade_response = {
+#                     "grade_id": grade_id,
+#                     "board": board,
+#                     "sections": []
+#                 }
+
+#                 for section_data in sections_data:
+
+#                     section_id = section_data.get(
+#                         "section_id"
+#                     )
+
+#                     subsections_data = section_data.get(
+#                         "subsections",
+#                         []
+#                     )
+
+#                     # ==================================================
+#                     # CASE 2: GRADE + SECTION ONLY
+#                     #
+#                     # No subsections
+#                     # ==================================================
+
+#                     if not subsections_data:
+
+#                         section_blueprint_key = (
+#                             grade_id,
+#                             board,
+#                             section_id,
+#                             None,
+#                             None,
+#                         )
+
+#                         section_blueprint_id = blueprint_id_map.get(
+#                             section_blueprint_key
+#                         )
+
+#                         grade_response["sections"].append(
+#                             {
+#                                 "blueprint_id": section_blueprint_id,
+#                                 "section_id": section_id,
+#                                 "subsections": []
+#                             }
+#                         )
+
+#                         continue
+
+#                     # ==================================================
+#                     # GRADE + SECTION + SUBSECTION
+#                     # ==================================================
+
+#                     section_response = {
+#                         "section_id": section_id,
+#                         "subsections": []
+#                     }
+
+#                     for subsection_data in subsections_data:
+
+#                         subsection_id = subsection_data.get(
+#                             "subsection_id"
+#                         )
+
+#                         questions_data = subsection_data.get(
+#                             "questions",
+#                             []
+#                         )
+
+#                         # ==================================================
+#                         # CASE 3: GRADE + SECTION + SUBSECTION ONLY
+#                         #
+#                         # No questions
+#                         # ==================================================
+
+#                         if not questions_data:
+
+#                             subsection_blueprint_key = (
+#                                 grade_id,
+#                                 board,
+#                                 section_id,
+#                                 subsection_id,
+#                                 None,
+#                             )
+
+#                             subsection_blueprint_id = (
+#                                 blueprint_id_map.get(
+#                                     subsection_blueprint_key
+#                                 )
+#                             )
+
+#                             section_response["subsections"].append(
+#                                 {
+#                                     "blueprint_id": subsection_blueprint_id,
+#                                     "subsection_id": subsection_id,
+#                                     "questions": []
+#                                 }
+#                             )
+
+#                             continue
+
+#                         # ==================================================
+#                         # GRADE + SECTION + SUBSECTION + QUESTION
+#                         # ==================================================
+
+#                         subsection_response = {
+#                             "subsection_id": subsection_id,
+#                             "questions": []
+#                         }
+
+#                         for question_item in questions_data:
+
+#                             question_id = question_item.get(
+#                                 "question_id"
+#                             )
+
+#                             question = questions.get(
+#                                 question_id
+#                             )
+
+#                             question_blueprint_key = (
+#                                 grade_id,
+#                                 board,
+#                                 section_id,
+#                                 subsection_id,
+#                                 question_id,
+#                             )
+
+#                             question_blueprint_id = (
+#                                 blueprint_id_map.get(
+#                                     question_blueprint_key
+#                                 )
+#                             )
+
+#                             subsection_response["questions"].append(
+#                                 {
+#                                     "blueprint_id": question_blueprint_id,
+#                                     "question_id": question_id,
+#                                     "question_text": (
+#                                         question.question_text
+#                                         if question
+#                                         else None
+#                                     )
+#                                 }
+#                             )
+
+#                         section_response["subsections"].append(
+#                             subsection_response
+#                         )
+
+#                     grade_response["sections"].append(
+#                         section_response
+#                     )
+
+#                 response_blueprint.append(
+#                     grade_response
+#                 )
+    
+    
+#             return Response(
+#                 {
+#                     "success": True,
+
+#                     "message": (
+#                         "Assessment blueprint "
+#                         "updated successfully."
+#                     ),
+
+#                     "data": {
+
+#                         "assessment_version": {
+
+#                             "id": version.id,
+
+#                             "public_id": str(
+#                                 version.public_id
+#                             ),
+
+#                             "version_number":
+#                                 version.version_number,
+
+#                             "status":
+#                                 version.status,
+
+#                             "total_sections":
+#                                 version.total_sections,
+
+#                             "total_subsections":
+#                                 version.total_subsections,
+
+#                             "total_questions":
+#                                 version.total_questions,
+
+#                             "total_marks":
+#                                 version.total_marks,
+#                         },
+
+#                         "blueprint": response_blueprint
+#                     }
+#                 },
+
+#                 status=status.HTTP_200_OK
+#             )
+
+#         except IntegrityError as exc:
+
+#             return Response(
+#                 {
+#                     "success": False,
+
+#                     "message": (
+#                         "Blueprint could not be updated "
+#                         "because of a database constraint."
+#                     ),
+
+#                     "error": str(exc)
+#                 },
+
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
+
+#         except Exception as exc:
+
+#             return Response(
+#                 {
+#                     "success": False,
+
+#                     "message": (
+#                         "Something went wrong while "
+#                         "updating the blueprint."
+#                     ),
+
+#                     "error": str(exc)
+#                 },
+
+#                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+#             )
+
 
 class AssessmentBlueprintItemUpdateAPIView(APIView):
     """
@@ -4521,6 +8005,27 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
 
     @transaction.atomic
     def put(self, request, version_id):
+        
+        # ==================================================
+        # DEBUG: Log the incoming request
+        # ==================================================
+        import json
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        logger.info("=" * 80)
+        logger.info("INCOMING REQUEST TO UPDATE BLUEPRINT")
+        logger.info(f"Version ID: {version_id}")
+        logger.info(f"Request Method: {request.method}")
+        logger.info(f"Content Type: {request.content_type}")
+        logger.info(f"User: {request.user}")
+        
+        # Log the raw request data (be careful with sensitive data in production)
+        try:
+            logger.info("Request Data:")
+            logger.info(json.dumps(request.data, indent=2, default=str))
+        except Exception as e:
+            logger.error(f"Error logging request data: {e}")
 
         try:
 
@@ -4536,7 +8041,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
             )
 
             if not version:
-
+                logger.warning(f"Assessment version not found: {version_id}")
                 return Response(
                     {
                         "success": False,
@@ -4544,6 +8049,8 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                     },
                     status=status.HTTP_404_NOT_FOUND
                 )
+            
+            logger.info(f"Found version: {version.id} - Status: {version.status}")
                 
             # ==================================================
             # STEP 1A: GET / CREATE ASSESSMENT
@@ -4559,7 +8066,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
             )
 
             if not assessment_data:
-
+                logger.warning("Assessment data is missing in request")
                 return Response(
                     {
                         "success": False,
@@ -4573,7 +8080,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
             )
 
             if not assessment_name:
-
+                logger.warning("Assessment name or ID is missing")
                 return Response(
                     {
                         "success": False,
@@ -4588,6 +8095,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                 assessment_name
             ).strip()
 
+            logger.info(f"Assessment name/ID: {assessment_name}")
 
             # ==================================================
             # CASE 1:
@@ -4611,7 +8119,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                 )
 
                 if not assessment:
-
+                    logger.warning(f"Assessment with ID {assessment_id} not found")
                     return Response(
                         {
                             "success": False,
@@ -4622,7 +8130,8 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                         },
                         status=status.HTTP_400_BAD_REQUEST
                     )
-
+                
+                logger.info(f"Found existing assessment by ID: {assessment_id}")
 
             # ==================================================
             # CASE 2:
@@ -4638,7 +8147,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                 )
 
                 if not assessment_type:
-
+                    logger.warning("assessment_type is required when creating new assessment")
                     return Response(
                         {
                             "success": False,
@@ -4669,6 +8178,8 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                         }
                     )
                 )
+
+                logger.info(f"Assessment {'created' if created else 'found'}: {assessment.id} - {assessment.name}")
 
                 # ----------------------------------------------
                 # Update existing assessment fields
@@ -4702,11 +8213,10 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                             )
 
                     if update_fields:
-
+                        logger.info(f"Updating assessment fields: {update_fields}")
                         assessment.save(
                             update_fields=update_fields
                         )
-
 
             # ==================================================
             # STEP 1B:
@@ -4722,13 +8232,11 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
             # --------------------------------------------------
 
             if version.assessment_id != assessment.id:
-
+                logger.info(f"Attaching assessment {assessment.id} to version {version.id}")
                 version.assessment = assessment
-
                 version_update_fields.append(
                     "assessment"
                 )
-
 
             # --------------------------------------------------
             # Update Assessment Version fields
@@ -4742,6 +8250,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
             )
 
             if version_data:
+                logger.info("Processing version data update")
 
                 version_field_mapping = {
                     "version_number": "version_number",
@@ -4754,6 +8263,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                     "allow_resume": "allow_resume",
                     "allow_review": "allow_review",
                     "randomize_sections": "randomize_sections",
+                    "section_wise_randomize_question": "section_wise_randomize_question",
                     "show_result_immediately": "show_result_immediately",
                     "instructions": "instructions",
                 }
@@ -4782,7 +8292,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                             )
 
                             if not report_template:
-
+                                logger.warning(f"Report template with ID {value} not found")
                                 return Response(
                                     {
                                         "success": False,
@@ -4815,7 +8325,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                     # ----------------------------------------------
 
                     else:
-
+                        logger.info(f"Updating version field {model_field} = {value}")
                         setattr(
                             version,
                             model_field,
@@ -4825,7 +8335,6 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                         version_update_fields.append(
                             model_field
                         )
-
 
             # --------------------------------------------------
             # Save Version
@@ -4842,6 +8351,8 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                         set(version_update_fields)
                     )
                 )
+                
+                logger.info(f"Version updated with fields: {version_update_fields}")
     
             # ==================================================
             # STEP 2: CHECK VERSION STATUS
@@ -4851,7 +8362,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                 version.status
                 == AssessmentVersion.Status.PUBLISHED
             ):
-
+                logger.warning(f"Attempted to modify published version: {version.id}")
                 return Response(
                     {
                         "success": False,
@@ -4871,16 +8382,123 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                 "blueprint_items"
             )
 
+            logger.info(f"Blueprint items count: {len(blueprint_items) if blueprint_items else 0}")
+            
+            # ==================================================
+            # STEP 3A: NORMALIZE BLUEPRINT DATA
+            # Fix: Handle both "questions" and "question_ids" fields
+            # ==================================================
+            
+            if blueprint_items:
+                logger.info("Normalizing blueprint data structure...")
+                
+                for grade_idx, grade_data in enumerate(blueprint_items):
+                    logger.info(f"Processing grade {grade_idx+1}: Grade ID {grade_data.get('grade_id')}")
+                    
+                    sections = grade_data.get("sections", [])
+                    
+                    for section_idx, section_data in enumerate(sections):
+                        logger.info(f"  Section {section_idx+1}: Section ID {section_data.get('section_id')}")
+                        
+                        subsections = section_data.get("subsections", [])
+                        
+                        for subsection_idx, subsection_data in enumerate(subsections):
+                            logger.info(f"    Subsection {subsection_idx+1}: Subsection ID {subsection_data.get('subsection_id')}")
+                            
+                            # Check what fields are present
+                            has_questions = "questions" in subsection_data
+                            has_question_ids = "question_ids" in subsection_data
+                            
+                            logger.info(f"      Has 'questions': {has_questions}")
+                            logger.info(f"      Has 'question_ids': {has_question_ids}")
+                            
+                            if has_questions:
+                                logger.info(f"      Questions data: {subsection_data.get('questions')}")
+                            
+                            if has_question_ids:
+                                logger.info(f"      Question_ids data: {subsection_data.get('question_ids')}")
+                            
+                            # NORMALIZE: If question_ids exists and questions doesn't, convert
+                            if "question_ids" in subsection_data and "questions" not in subsection_data:
+                                logger.info("      Converting 'question_ids' to 'questions'")
+                                question_ids = subsection_data.pop("question_ids")
+                                
+                                # Convert to the expected format: [{"question_id": id}, ...]
+                                if isinstance(question_ids, list):
+                                    subsection_data["questions"] = [
+                                        {"question_id": qid} for qid in question_ids if qid
+                                    ]
+                                elif isinstance(question_ids, dict):
+                                    # If it's a dict with different structure, try to extract
+                                    subsection_data["questions"] = question_ids
+                                
+                                logger.info(f"      Converted questions: {subsection_data.get('questions')}")
+                            
+                            # If both exist, ensure questions takes precedence
+                            elif "questions" in subsection_data and "question_ids" in subsection_data:
+                                logger.info("      Both 'questions' and 'question_ids' exist, using 'questions'")
+                                subsection_data.pop("question_ids", None)
+                            
+                            # Log the final structure
+                            final_questions = subsection_data.get("questions", [])
+                            logger.info(f"      Final questions count: {len(final_questions) if final_questions else 0}")
+            
             is_draft = request.data.get(
                 "is_draft",
                 True
             )
+            
+            logger.info(f"Is draft: {is_draft}")
             
             blueprint_status = (
                 AssessmentBlueprintItem.Status.DRAFT
                 if is_draft
                 else AssessmentBlueprintItem.Status.ACTIVE
             )
+            
+            # ==================================================
+            # STEP 3B: SUPPORT FLAT BLUEPRINT REQUEST
+            # ==================================================
+
+            if not blueprint_items:
+
+                grade_id = request.data.get("grade_id")
+                board = request.data.get(
+                    "board",
+                    AssessmentBlueprintItem.Board.ALL
+                )
+                section_id = request.data.get("section_id")
+                subsection_id = request.data.get("subsection_id")
+                question_id = request.data.get("question_id")
+
+                if grade_id:
+
+                    blueprint_items = [
+                        {
+                            "grade_id": grade_id,
+                            "board": board,
+                            "sections": [
+                                {
+                                    "section_id": section_id,
+                                    "subsections": [
+                                        {
+                                            "subsection_id": subsection_id,
+                                            "questions": (
+                                                [{"question_id": question_id}]
+                                                if question_id
+                                                else []
+                                            )
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+
+                    logger.info(
+                        "Converted flat request into blueprint_items: %s",
+                        blueprint_items
+                    )
 
             # --------------------------------------------------
             # If blueprint_items are not provided
@@ -4894,9 +8512,10 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
             # --------------------------------------------------
 
             if not blueprint_items:
+                logger.warning("No blueprint items provided")
 
                 if not is_draft:
-
+                    logger.warning("Publishing without blueprint_items")
                     return Response(
                         {
                             "success": False,
@@ -4915,6 +8534,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                 # Simply continue and return success.
                 # --------------------------------------------------
 
+                logger.info("Draft update without blueprint - returning success")
                 return Response(
                     {
                         "success": True,
@@ -4961,15 +8581,17 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
             # ==================================================
 
             if not is_draft:
+                logger.info("Validating blueprint for publishing...")
 
-                for grade_data in blueprint_items:
+                for grade_idx, grade_data in enumerate(blueprint_items):
+                    logger.info(f"Validating grade {grade_idx+1}: {grade_data.get('grade_id')}")
 
                     # ------------------------------------------
                     # GRADE
                     # ------------------------------------------
 
                     if not grade_data.get("grade_id"):
-
+                        logger.error("Grade ID is missing")
                         return Response(
                             {
                                 "success": False,
@@ -4986,7 +8608,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                     # ------------------------------------------
 
                     if not grade_data.get("board"):
-
+                        logger.error("Board is missing")
                         return Response(
                             {
                                 "success": False,
@@ -5002,8 +8624,10 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                     # SECTIONS
                     # ------------------------------------------
 
-                    if not grade_data.get("sections"):
-
+                    sections = grade_data.get("sections", [])
+                    
+                    if not sections:
+                        logger.error("Sections are missing")
                         return Response(
                             {
                                 "success": False,
@@ -5015,14 +8639,17 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                             status=status.HTTP_400_BAD_REQUEST
                         )
 
-                    for section_data in grade_data["sections"]:
+                    for section_idx, section_data in enumerate(sections):
+                        logger.info(f"  Validating section {section_idx+1}: {section_data.get('section_id')}")
 
                         # --------------------------------------
                         # SUBSECTIONS
                         # --------------------------------------
 
-                        if not section_data.get("subsections"):
-
+                        subsections = section_data.get("subsections", [])
+                        
+                        if not subsections:
+                            logger.error("Subsections are missing")
                             return Response(
                                 {
                                     "success": False,
@@ -5034,18 +8661,22 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                                 status=status.HTTP_400_BAD_REQUEST
                             )
 
-                        for subsection_data in section_data[
-                            "subsections"
-                        ]:
+                        for subsection_idx, subsection_data in enumerate(subsections):
+                            logger.info(f"    Validating subsection {subsection_idx+1}: {subsection_data.get('subsection_id')}")
 
                             # ----------------------------------
                             # QUESTIONS
                             # ----------------------------------
 
-                            if not subsection_data.get(
-                                "question_ids"
-                            ):
+                            questions_data = subsection_data.get("questions", [])
 
+                            # DEBUG: Log what we received
+                            logger.info(f"      Questions data type: {type(questions_data)}")
+                            logger.info(f"      Questions data: {questions_data}")
+
+                            # Questions must exist
+                            if not isinstance(questions_data, list) or not questions_data:
+                                logger.error(f"      Questions are missing or empty. Received: {questions_data}")
                                 return Response(
                                     {
                                         "success": False,
@@ -5056,6 +8687,38 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                                     },
                                     status=status.HTTP_400_BAD_REQUEST
                                 )
+
+                            # Every question must contain question_id
+                            for question_idx, question_item in enumerate(questions_data):
+                                logger.info(f"        Validating question {question_idx+1}: {question_item}")
+
+                                if not isinstance(question_item, dict):
+                                    logger.error(f"        Question item is not a dict: {question_item}")
+                                    return Response(
+                                        {
+                                            "success": False,
+                                            "message": (
+                                                "Each question must contain "
+                                                "question_id when publishing."
+                                            )
+                                        },
+                                        status=status.HTTP_400_BAD_REQUEST
+                                    )
+
+                                question_id = question_item.get("question_id")
+
+                                if question_id is None or question_id == "":
+                                    logger.error(f"        Question ID is missing or empty: {question_item}")
+                                    return Response(
+                                        {
+                                            "success": False,
+                                            "message": (
+                                                "Question ID is required "
+                                                "when publishing."
+                                            )
+                                        },
+                                        status=status.HTTP_400_BAD_REQUEST
+                                    )
 
             # ==================================================
             # STEP 5: COLLECT IDS
@@ -5100,11 +8763,16 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                             )
 
                         question_ids.update(
-                            subsection_data.get(
-                                "question_ids",
-                                []
-                            )
+                            q.get("question_id")
+                            for q in subsection_data.get("questions", [])
+                            if isinstance(q, dict) and q.get("question_id")
                         )
+
+            logger.info(f"Collected IDs:")
+            logger.info(f"  Grade IDs: {grade_ids}")
+            logger.info(f"  Section IDs: {section_ids}")
+            logger.info(f"  Subsection IDs: {subsection_ids}")
+            logger.info(f"  Question IDs: {question_ids}")
 
             # ==================================================
             # STEP 6: FETCH MASTER DATA
@@ -5138,6 +8806,12 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                 )
             }
 
+            logger.info(f"Fetched from DB:")
+            logger.info(f"  Grades found: {len(grades)}")
+            logger.info(f"  Sections found: {len(sections)}")
+            logger.info(f"  Subsections found: {len(subsections)}")
+            logger.info(f"  Questions found: {len(questions)}")
+
             # ==================================================
             # STEP 7: VALIDATE MASTER IDS
             # ==================================================
@@ -5147,7 +8821,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
             )
 
             if missing_grades:
-
+                logger.error(f"Invalid Grade IDs: {missing_grades}")
                 return Response(
                     {
                         "success": False,
@@ -5164,7 +8838,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
             )
 
             if missing_sections:
-
+                logger.error(f"Invalid Section IDs: {missing_sections}")
                 return Response(
                     {
                         "success": False,
@@ -5182,7 +8856,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
             )
 
             if missing_subsections:
-
+                logger.error(f"Invalid SubSection IDs: {missing_subsections}")
                 return Response(
                     {
                         "success": False,
@@ -5200,7 +8874,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
             )
 
             if missing_questions:
-
+                logger.error(f"Invalid Question IDs: {missing_questions}")
                 return Response(
                     {
                         "success": False,
@@ -5255,10 +8929,14 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                             "subsection_id"
                         )
 
-                        for question_id in subsection_data.get(
-                            "question_ids",
+                        for question_item in subsection_data.get(
+                            "questions",
                             []
                         ):
+                            question_id = question_item.get("question_id")
+
+                            if not question_id:
+                                continue
 
                             assignment_key = (
                                 grade_id,
@@ -5268,7 +8946,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                             )
 
                             if assignment_key in assigned_questions:
-
+                                logger.error(f"Duplicate assignment: {assignment_key}")
                                 return Response(
                                     {
                                         "success": False,
@@ -5286,6 +8964,8 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                             assigned_questions.add(
                                 assignment_key
                             )
+
+            logger.info(f"Unique assignments: {len(assigned_questions)}")
 
             # ==================================================
             # STEP 9:
@@ -5313,7 +8993,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                 grade = grades.get(grade_id)
 
                 if not grade:
-
+                    logger.error(f"Grade {grade_id} not found")
                     return Response(
                         {
                             "success": False,
@@ -5342,7 +9022,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                     )
 
                     if not section:
-
+                        logger.error(f"Section {section_id} not found")
                         return Response(
                             {
                                 "success": False,
@@ -5372,7 +9052,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                         )
 
                         if not subsection:
-
+                            logger.error(f"SubSection {subsection_id} not found")
                             return Response(
                                 {
                                     "success": False,
@@ -5388,21 +9068,30 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                         # --------------------------------------------------
                         # Questions
                         #
-                        # Question does NOT have subsection_id.
-                        # Therefore, only validate that the question exists.
+                        # Request format:
+                        #
+                        # "questions": [
+                        #     {"question_id": 37},
+                        #     {"question_id": 38}
+                        # ]
                         # --------------------------------------------------
 
-                        for question_id in subsection_data.get(
-                            "question_ids",
-                            []
-                        ):
+                        questions_data = subsection_data.get("questions", [])
 
-                            question = questions.get(
-                                question_id
-                            )
+                        for question_item in questions_data:
+
+                            if not isinstance(question_item, dict):
+                                continue
+
+                            question_id = question_item.get("question_id")
+
+                            if not question_id:
+                                continue
+
+                            question = questions.get(question_id)
 
                             if not question:
-
+                                logger.error(f"Question {question_id} not found")
                                 return Response(
                                     {
                                         "success": False,
@@ -5430,6 +9119,8 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                 )
             )
 
+            logger.info(f"Question-Grade mappings found: {len(question_grade_mappings)}")
+
             for grade_data in blueprint_items:
 
                 grade_id = grade_data.get(
@@ -5446,61 +9137,59 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                         []
                     ):
 
-                        for question_id in subsection_data.get(
-                            "question_ids",
-                            []
-                        ):
+                        for question_item in subsection_data.get("questions", []):
+
+                            question_id = question_item.get("question_id")
+
+                            if not question_id:
+                                continue
 
                             if (
                                 question_id,
                                 grade_id
                             ) not in question_grade_mappings:
-
+                                logger.error(f"Question {question_id} not mapped to Grade {grade_id}")
                                 return Response(
                                     {
                                         "success": False,
                                         "message": (
-                                            f"Question "
-                                            f"{question_id} "
-                                            f"is not mapped "
-                                            f"to Grade "
+                                            f"Question {question_id} "
+                                            f"is not mapped to Grade "
                                             f"{grade_id}."
                                         )
                                     },
                                     status=status.HTTP_400_BAD_REQUEST
                                 )
 
-            # ==================================================
+            # ==============================================================
             # STEP 11:
-            # UPDATE / CREATE BLUEPRINT ITEMS
+            # SYNC BLUEPRINT ITEMS
             #
-            # IMPORTANT:
-            # Existing blueprint rows are NOT deleted.
+            # RULE:
             #
-            # Logic:
-            # 1. Exact existing combination -> UPDATE
-            # 2. Empty blueprint row -> REUSE ONLY ONCE
-            # 3. If no empty row remains -> CREATE NEW
+            # 1. Exact same hierarchy exists -> UPDATE
+            # 2. New hierarchy combination -> CREATE
+            # 3. Existing DB hierarchy not present in request -> DELETE
             #
             # Example:
             #
-            # Existing DB:
-            #   id=10, grade=NULL, section=NULL,
-            #          subsection=NULL, question=NULL
+            # OLD:
+            # Grade 25 + Section 19 + SubSection 29 + Question 20
             #
-            # Request:
-            #   Grade 25
-            #   Grade 29
+            # REQUEST:
+            # Grade 29 + Section 19 + SubSection 29 + Question 20
             #
-            # Result:
+            # RESULT:
             #
-            #   id=10 -> Grade 25
-            #   new id=11 -> Grade 29
+            # DELETE:
+            # Grade 25 + Section 19 + SubSection 29 + Question 20
             #
-            # NEVER use id=10 for both grades.
-            # ==================================================
+            # CREATE:
+            # Grade 29 + Section 19 + SubSection 29 + Question 20
+            #
+            # ==============================================================
 
-            existing_blueprint_qs = (
+            existing_blueprint_qs = list(
                 AssessmentBlueprintItem.objects
                 .filter(
                     assessment_version_id=version_id
@@ -5508,569 +9197,113 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                 .order_by("id")
             )
 
-            existing_blueprints = {
-                (
-                    item.assessment_version_id,
+            logger.info(f"Existing blueprint items in DB: {len(existing_blueprint_qs)}")
+
+            # ==============================================================
+            # STEP 11A:
+            # BUILD EXISTING DB MAP
+            # ==============================================================
+
+            existing_map = {}
+
+            for item in existing_blueprint_qs:
+
+                key = (
                     item.grade_id,
                     item.board,
                     item.section_id,
                     item.subsection_id,
                     item.question_id,
-                ): item
-                for item in existing_blueprint_qs
-            }
-            
-            # ==========================================================
-            # HELPER:
-            # FIND EXISTING BLUEPRINT
-            #
-            # Priority:
-            #
-            # 1. Exact combination
-            # 2. Same grade + board + section
-            # 3. Same grade + board + section + subsection
-            # 4. Existing grade-only row
-            #
-            # This prevents duplicate rows for the same grade.
-            # ==========================================================
-
-            def find_existing_blueprint(
-                grade_id,
-                board,
-                section_id=None,
-                subsection_id=None,
-                question_id=None,
-            ):
-                """
-                Find an existing blueprint row for UPDATE.
-
-                Priority:
-                1. Exact combination
-                2. Same version + section + subsection + question
-                -> allows grade to be changed
-                3. Same version + grade + section + subsection
-                -> allows question to be changed
-                4. Same version + grade + section
-                5. Same version + grade only
-
-                IMPORTANT:
-                Exact match always has highest priority.
-                """
-
-                # ==========================================================
-                # 1. EXACT MATCH
-                # ==========================================================
-
-                exact_key = (
-                    version_id,
-                    grade_id,
-                    board,
-                    section_id,
-                    subsection_id,
-                    question_id,
                 )
 
-                existing_item = existing_blueprints.get(exact_key)
+                existing_map[key] = item
 
-                if existing_item:
-                    return existing_item
+            # ==============================================================
+            # STEP 11B:
+            # FLATTEN REQUEST INTO EXACT COMBINATIONS
+            # ==============================================================
 
-
-                # ==========================================================
-                # 2. GRADE UPDATE
-                #
-                # Existing:
-                # version 1 + grade 25 + section 19 + subsection 29
-                #
-                # Request:
-                # version 1 + grade 29 + section 19 + subsection 29
-                #
-                # Update grade instead of creating a new row.
-                #
-                # Only use this when the lower hierarchy matches.
-                # ==========================================================
-
-                if (
-                    section_id is not None
-                    and subsection_id is not None
-                    and question_id is not None
-                ):
-
-                    for item in existing_blueprint_qs:
-                        
-                        if item.id in used_blueprint_ids:
-                            continue
-
-                        if (
-                            item.board == board
-                            and item.section_id == section_id
-                            and item.subsection_id == subsection_id
-                            and item.question_id == question_id
-                        ):
-                            return item
-
-
-                # ==========================================================
-                # 3. SUBSECTION UPDATE
-                #
-                # Existing:
-                # version 1 + grade 25 + section 19 + subsection 29
-                #
-                # Request:
-                # version 1 + grade 25 + section 19 + subsection 30
-                #
-                # This is harder to distinguish from adding a new subsection.
-                #
-                # Therefore only match an existing subsection-only row.
-                # ==========================================================
-
-                if (
-                    section_id is not None
-                    and subsection_id is not None
-                    and question_id is None
-                ):
-
-                    for item in existing_blueprint_qs:
-
-                        if (
-                            item.grade_id == grade_id
-                            and item.board == board
-                            and item.section_id == section_id
-                            and item.subsection_id is not None
-                            and item.question_id is None
-                        ):
-
-                            return item
-
-
-                # ==========================================================
-                # 4. SAME GRADE + BOARD + SECTION + SUBSECTION
-                # ==========================================================
-
-                if section_id is not None and subsection_id is not None:
-
-                    for item in existing_blueprint_qs:
-
-                        if (
-                            item.grade_id == grade_id
-                            and item.board == board
-                            and item.section_id == section_id
-                            and item.subsection_id == subsection_id
-                            and item.question_id is None
-                        ):
-                            return item
-
-
-                # ==========================================================
-                # 5. SAME GRADE + BOARD + SECTION
-                # ==========================================================
-
-                if section_id is not None:
-
-                    for item in existing_blueprint_qs:
-
-                        if (
-                            item.grade_id == grade_id
-                            and item.board == board
-                            and item.section_id == section_id
-                            and item.subsection_id is None
-                            and item.question_id is None
-                        ):
-                            return item
-
-
-                # ==========================================================
-                # 6. SAME GRADE + BOARD ONLY
-                # ==========================================================
-
-                for item in existing_blueprint_qs:
-
-                    if (
-                        item.grade_id == grade_id
-                        and item.board == board
-                        and item.section_id is None
-                        and item.subsection_id is None
-                        and item.question_id is None
-                    ):
-                        return item
-
-
-                return None
-
-            # ==================================================
-            # GET EMPTY BLUEPRINT RECORDS
-            # ==================================================
-
-            empty_blueprints = list(
-                AssessmentBlueprintItem.objects.filter(
-                    assessment_version_id=version_id,
-                    grade__isnull=True,
-                    section__isnull=True,
-                    subsection__isnull=True,
-                    question__isnull=True,
-                ).order_by("id")
-            )
-
-
-            # ==================================================
-            # IMPORTANT:
-            # Keep track of EMPTY ROWS ALREADY CONSUMED
-            #
-            # Once an empty row is assigned to Grade 25,
-            # it must NEVER be reused for Grade 29.
-            # ==================================================
-
-            used_empty_blueprint_ids = set()
-            
-            used_blueprint_ids = set()
-
-
-            sequence_no = 1
-
-            new_blueprint_objects = []
-            update_blueprint_objects = []
-
-
-            # ==================================================
-            # HELPER:
-            # GET EMPTY BLUEPRINT ONLY ONCE
-            # ==================================================
-
-            def get_reusable_empty_blueprint():
-
-                for empty_item in empty_blueprints:
-
-                    if empty_item.id not in used_empty_blueprint_ids:
-
-                        used_empty_blueprint_ids.add(
-                            empty_item.id
-                        )
-
-                        return empty_item
-
-                return None
-
-
-            # ==================================================
-            # PROCESS BLUEPRINT ITEMS
-            # ==================================================
+            requested_items = []
 
             for grade_data in blueprint_items:
 
-                # ----------------------------------------------
-                # GRADE
-                # ----------------------------------------------
-
-                grade_id = grade_data["grade_id"]
-
-                grade = grades[grade_id]
+                grade_id = grade_data.get("grade_id")
 
                 board = grade_data.get(
                     "board",
                     AssessmentBlueprintItem.Board.ALL
                 )
 
-                # ----------------------------------------------
-                # SECTIONS
-                # ----------------------------------------------
-
                 sections_data = grade_data.get(
                     "sections",
                     []
                 )
 
-
-                # ==================================================
-                # CASE 1:
-                # ONLY GRADE
-                #
-                # Example:
-                #
-                # {
-                #     "grade_id": 25,
-                #     "board": "ALL",
-                #     "sections": []
-                # }
-                # ==================================================
+                # ----------------------------------------------------------
+                # GRADE ONLY
+                # ----------------------------------------------------------
 
                 if not sections_data:
 
-                    blueprint_key = (
-                        version_id,
-                        grade_id,
-                        board,
-                        None,
-                        None,
-                        None,
-                    )
-
-
-                    # ==================================================
-                    # 1. EXACT EXISTING RECORD
-                    # ==================================================
-
-                    existing_item = existing_blueprints.get(
-                        blueprint_key
-                    )
-
-
-                    # ==================================================
-                    # 2. REUSE ONE EMPTY RECORD
-                    #
-                    # ONLY if exact record does not exist.
-                    # ==================================================
-
-                    if not existing_item:
-
-                        existing_item = (
-                            get_reusable_empty_blueprint()
-                        )
-
-
-                    # ==================================================
-                    # EXISTING / EMPTY RECORD -> UPDATE
-                    # ==================================================
-
-                    if existing_item:
-
-                        existing_item.grade = grade
-                        existing_item.board = board
-                        existing_item.section = None
-                        existing_item.subsection = None
-                        existing_item.question = None
-
-                        existing_item.sequence_no = sequence_no
-
-                        existing_item.marks_override = (
-                            grade_data.get(
-                                "marks_override"
-                            )
-                        )
-
-                        existing_item.negative_marks_override = (
-                            grade_data.get(
-                                "negative_marks_override"
-                            )
-                        )
-
-                        existing_item.status = blueprint_status
-
-                        update_blueprint_objects.append(
-                            existing_item
-                        )
-
-                        # ------------------------------------------
-                        # VERY IMPORTANT
-                        #
-                        # Add the updated record into the dictionary.
-                        #
-                        # This prevents another request item from
-                        # accidentally selecting the same record.
-                        # ------------------------------------------
-
-                        existing_blueprints[
-                            blueprint_key
-                        ] = existing_item
-
-
-                    # ==================================================
-                    # NO EMPTY RECORD LEFT -> CREATE NEW
-                    # ==================================================
-
-                    else:
-
-                        new_blueprint_objects.append(
-                            AssessmentBlueprintItem(
-
-                                assessment_version=version,
-
-                                grade=grade,
-
-                                section=None,
-
-                                subsection=None,
-
-                                question=None,
-
-                                board=board,
-
-                                sequence_no=sequence_no,
-
-                                marks_override=(
-                                    grade_data.get(
-                                        "marks_override"
-                                    )
-                                ),
-
-                                negative_marks_override=(
-                                    grade_data.get(
-                                        "negative_marks_override"
-                                    )
-                                ),
-
-                                status=blueprint_status,
-                            )
-                        )
-
-
-                    sequence_no += 1
+                    requested_items.append({
+                        "grade_id": grade_id,
+                        "board": board,
+                        "section_id": None,
+                        "subsection_id": None,
+                        "question_id": None,
+                        "marks_override": grade_data.get(
+                            "marks_override"
+                        ),
+                        "negative_marks_override": grade_data.get(
+                            "negative_marks_override"
+                        ),
+                    })
 
                     continue
 
-
-                # ==================================================
-                # CASE 2 / 3 / 4:
-                #
-                # GRADE + SECTION
-                # GRADE + SECTION + SUBSECTION
-                # GRADE + SECTION + SUBSECTION + QUESTION
-                # ==================================================
+                # ----------------------------------------------------------
+                # SECTIONS
+                # ----------------------------------------------------------
 
                 for section_data in sections_data:
 
-                    # ==========================================================
-                    # SECTION
-                    # ==========================================================
-
-                    section_id = section_data.get("section_id")
+                    section_id = section_data.get(
+                        "section_id"
+                    )
 
                     if not section_id:
                         continue
 
-                    section = sections.get(section_id)
+                    subsections_data = section_data.get(
+                        "subsections",
+                        []
+                    )
 
-                    if not section:
-                        return Response(
-                            {
-                                "success": False,
-                                "message": f"Section {section_id} not found."
-                            },
-                            status=status.HTTP_400_BAD_REQUEST
-                        )
-
-                    # ==========================================================
-                    # CHECK WHETHER SUBSECTIONS WERE SENT
-                    # ==========================================================
-
-                    subsections_data = section_data.get("subsections", [])
-
-
-                    # ==========================================================
+                    # ------------------------------------------------------
                     # SECTION ONLY
-                    #
-                    # Example:
-                    #
-                    # {
-                    #     "grade_id": 25,
-                    #     "board": "ALL",
-                    #     "sections": [
-                    #         {
-                    #             "section_id": 19
-                    #         }
-                    #     ]
-                    # }
-                    #
-                    # Store:
-                    #
-                    # grade = 25
-                    # section = 19
-                    # subsection = NULL
-                    # question = NULL
-                    # ==========================================================
+                    # ------------------------------------------------------
 
                     if not subsections_data:
 
-                        existing_item = find_existing_blueprint(
-                            grade_id=grade_id,
-                            board=board,
-                            section_id=section_id,
-                            subsection_id=None,
-                            question_id=None,
-                        )
-
-                        if existing_item:
-                            
-                            used_blueprint_ids.add(existing_item.id)
-
-                            # ----------------------------------------------
-                            # UPDATE EXISTING ROW
-                            # ----------------------------------------------
-
-                            existing_item.grade = grade
-                            existing_item.board = board
-                            existing_item.section = section
-                            existing_item.subsection = None
-                            existing_item.question = None
-
-                            existing_item.sequence_no = sequence_no
-
-                            existing_item.marks_override = (
-                                section_data.get(
-                                    "marks_override"
-                                )
-                            )
-
-                            existing_item.negative_marks_override = (
-                                section_data.get(
-                                    "negative_marks_override"
-                                )
-                            )
-
-                            # IMPORTANT:
-                            # draft -> DRAFT
-                            # publish -> ACTIVE
-                            existing_item.status = blueprint_status
-
-                            update_blueprint_objects.append(
-                                existing_item
-                            )
-
-                        else:
-
-                            # ----------------------------------------------
-                            # CREATE ONLY IF SAME GRADE/SECTION DOES NOT EXIST
-                            # ----------------------------------------------
-
-                            new_blueprint_objects.append(
-                                AssessmentBlueprintItem(
-                                    assessment_version=version,
-
-                                    grade=grade,
-
-                                    board=board,
-
-                                    section=section,
-
-                                    subsection=None,
-
-                                    question=None,
-
-                                    sequence_no=sequence_no,
-
-                                    marks_override=(
-                                        section_data.get(
-                                            "marks_override"
-                                        )
-                                    ),
-
-                                    negative_marks_override=(
-                                        section_data.get(
-                                            "negative_marks_override"
-                                        )
-                                    ),
-
-                                    status=blueprint_status,
-                                )
-                            )
-
-                        sequence_no += 1
+                        requested_items.append({
+                            "grade_id": grade_id,
+                            "board": board,
+                            "section_id": section_id,
+                            "subsection_id": None,
+                            "question_id": None,
+                            "marks_override": section_data.get(
+                                "marks_override"
+                            ),
+                            "negative_marks_override": section_data.get(
+                                "negative_marks_override"
+                            ),
+                        })
 
                         continue
-                    
-                    
-                    # ==========================================================
-                    # SUBSECTION / QUESTION LEVEL
-                    # ==========================================================
+
+                    # ------------------------------------------------------
+                    # SUBSECTIONS
+                    # ------------------------------------------------------
 
                     for subsection_data in subsections_data:
 
@@ -6081,547 +9314,255 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                         if not subsection_id:
                             continue
 
-                        subsection = subsections.get(
-                            subsection_id
-                        )
-
-                        if not subsection:
-                            return Response(
-                                {
-                                    "success": False,
-                                    "message": (
-                                        f"SubSection "
-                                        f"{subsection_id} not found."
-                                    )
-                                },
-                                status=status.HTTP_400_BAD_REQUEST
-                            )
-
-                        question_list = subsection_data.get(
-                            "question_ids",
+                        questions_data = subsection_data.get(
+                            "questions",
                             []
                         )
 
-                        # ======================================================
+                        question_ids_for_subsection = [
+                            q.get("question_id")
+                            for q in questions_data
+                            if isinstance(q, dict)
+                            and q.get("question_id")
+                        ]
+
+                        # --------------------------------------------------
                         # SUBSECTION ONLY
-                        # ======================================================
+                        # --------------------------------------------------
 
-                        if not question_list:
+                        if not question_ids_for_subsection:
 
-                            subsection_key = (
-                                version_id,
-                                grade_id,
-                                board,
-                                section_id,
-                                subsection_id,
-                                None,
-                            )
-
-                            existing_item = existing_blueprints.get(
-                                subsection_key
-                            )
-
-                            # --------------------------------------------------
-                            # 1. EXISTING EXACT SUBSECTION
-                            # --------------------------------------------------
-
-                            if existing_item:
-                                
-                                used_blueprint_ids.add(existing_item.id)
-
-                                existing_item.grade = grade
-                                existing_item.board = board
-                                existing_item.section = section
-                                existing_item.subsection = subsection
-                                existing_item.question = None
-
-                                existing_item.sequence_no = sequence_no
-
-                                existing_item.marks_override = (
-                                    subsection_data.get("marks_override")
-                                )
-
-                                existing_item.negative_marks_override = (
-                                    subsection_data.get("negative_marks_override")
-                                )
-
-                                existing_item.status = blueprint_status
-
-                                update_blueprint_objects.append(
-                                    existing_item
-                                )
-
-                            # --------------------------------------------------
-                            # 2. EXISTING SECTION-ONLY RECORD
-                            # --------------------------------------------------
-
-                            if not existing_item:
-
-                                section_key = (
-                                    version_id,
-                                    grade_id,
-                                    board,
-                                    section_id,
-                                    None,
-                                    None,
-                                )
-
-                                existing_item = existing_blueprints.get(
-                                    section_key
-                                )
-
-                                if existing_item:
-
-                                    existing_blueprints.pop(
-                                        section_key,
-                                        None
-                                    )
-
-                            # --------------------------------------------------
-                            # 3. EXISTING GRADE-ONLY RECORD
-                            #
-                            # Example:
-                            #
-                            # Existing:
-                            # grade = 25
-                            # board = CBSE
-                            # section = NULL
-                            # subsection = NULL
-                            # question = NULL
-                            #
-                            # Request:
-                            # grade = 25
-                            # board = CBSE
-                            # section = 19
-                            # subsection = 30
-                            #
-                            # Reuse the existing record.
-                            # --------------------------------------------------
-
-                            if not existing_item:
-
-                                grade_only_key = (
-                                    version_id,
-                                    grade_id,
-                                    board,
-                                    None,
-                                    None,
-                                    None,
-                                )
-
-                                existing_item = existing_blueprints.get(
-                                    grade_only_key
-                                )
-
-                                if existing_item:
-
-                                    existing_blueprints.pop(
-                                        grade_only_key,
-                                        None
-                                    )
-
-                            # --------------------------------------------------
-                            # 4. EXISTING GRADE-ONLY RECORD WITH DIFFERENT BOARD
-                            #
-                            # USE THIS ONLY IF:
-                            # one blueprint per grade is allowed and board can
-                            # be changed from ALL -> CBSE or CBSE -> ALL.
-                            # --------------------------------------------------
-
-                            if not existing_item:
-
-                                for item in existing_blueprint_qs:
-
-                                    if (
-                                        item.grade_id == grade_id
-                                        and item.section_id is None
-                                        and item.subsection_id is None
-                                        and item.question_id is None
-                                    ):
-
-                                        existing_item = item
-
-                                        existing_blueprints.pop(
-                                            (
-                                                version_id,
-                                                item.grade_id,
-                                                item.board,
-                                                None,
-                                                None,
-                                                None,
-                                            ),
-                                            None
-                                        )
-
-                                        break
-
-                            # --------------------------------------------------
-                            # 5. REUSE EMPTY RECORD
-                            # --------------------------------------------------
-
-                            if not existing_item:
-
-                                existing_item = (
-                                    get_reusable_empty_blueprint()
-                                )
-
-                            # --------------------------------------------------
-                            # 6. UPDATE EXISTING RECORD
-                            # --------------------------------------------------
-
-                            if existing_item:
-                                
-                                used_blueprint_ids.add(existing_item.id)
-
-                                existing_item.grade = grade
-                                existing_item.board = board
-                                existing_item.section = section
-                                existing_item.subsection = subsection
-                                existing_item.question = None
-
-                                existing_item.sequence_no = sequence_no
-
-                                existing_item.marks_override = (
-                                    subsection_data.get(
-                                        "marks_override"
-                                    )
-                                )
-
-                                existing_item.negative_marks_override = (
-                                    subsection_data.get(
-                                        "negative_marks_override"
-                                    )
-                                )
-
-                                existing_item.status = blueprint_status
-
-                                update_blueprint_objects.append(
-                                    existing_item
-                                )
-
-                                # Add new key
-                                existing_blueprints[
-                                    subsection_key
-                                ] = existing_item
-
-                            # --------------------------------------------------
-                            # 7. CREATE ONLY IF NOTHING EXISTS
-                            # --------------------------------------------------
-
-                            else:
-
-                                new_blueprint_objects.append(
-                                    AssessmentBlueprintItem(
-                                        assessment_version=version,
-                                        grade=grade,
-                                        board=board,
-                                        section=section,
-                                        subsection=subsection,
-                                        question=None,
-                                        sequence_no=sequence_no,
-
-                                        marks_override=(
-                                            subsection_data.get(
-                                                "marks_override"
-                                            )
-                                        ),
-
-                                        negative_marks_override=(
-                                            subsection_data.get(
-                                                "negative_marks_override"
-                                            )
-                                        ),
-
-                                        status=blueprint_status,
-                                    )
-                                )
-
-                            sequence_no += 1
+                            requested_items.append({
+                                "grade_id": grade_id,
+                                "board": board,
+                                "section_id": section_id,
+                                "subsection_id": subsection_id,
+                                "question_id": None,
+                                "marks_override": subsection_data.get(
+                                    "marks_override"
+                                ),
+                                "negative_marks_override": subsection_data.get(
+                                    "negative_marks_override"
+                                ),
+                            })
 
                             continue
 
-                        # ======================================================
+                        # --------------------------------------------------
                         # QUESTION LEVEL
-                        # ======================================================
+                        # --------------------------------------------------
 
-                        for question_id in question_list:
+                        for question_id in question_ids_for_subsection:
 
-                            question = questions.get(question_id)
+                            requested_items.append({
+                                "grade_id": grade_id,
+                                "board": board,
+                                "section_id": section_id,
+                                "subsection_id": subsection_id,
+                                "question_id": question_id,
+                                "marks_override": subsection_data.get(
+                                    "marks_override"
+                                ),
+                                "negative_marks_override": subsection_data.get(
+                                    "negative_marks_override"
+                                ),
+                            })
 
-                            if not question:
-                                return Response(
-                                    {
-                                        "success": False,
-                                        "message": f"Question {question_id} not found."
-                                    },
-                                    status=status.HTTP_400_BAD_REQUEST
-                                )
+            logger.info(f"Flattened requested items: {len(requested_items)}")
 
-                            question_key = (
-                                version_id,
-                                grade_id,
-                                board,
-                                section_id,
-                                subsection_id,
-                                question_id,
+            # ==============================================================
+            # STEP 11C:
+            # VALIDATE DUPLICATE REQUEST COMBINATIONS
+            # ==============================================================
+
+            requested_keys = set()
+
+            for item_data in requested_items:
+
+                key = (
+                    item_data["grade_id"],
+                    item_data["board"],
+                    item_data["section_id"],
+                    item_data["subsection_id"],
+                    item_data["question_id"],
+                )
+
+                if key in requested_keys:
+                    logger.error(f"Duplicate combination found: {key}")
+                    return Response(
+                        {
+                            "success": False,
+                            "message": (
+                                "Duplicate blueprint combination found: "
+                                f"Grade={item_data['grade_id']}, "
+                                f"Board={item_data['board']}, "
+                                f"Section={item_data['section_id']}, "
+                                f"SubSection={item_data['subsection_id']}, "
+                                f"Question={item_data['question_id']}"
                             )
+                        },
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
 
-                            # ==================================================
-                            # 1. EXACT QUESTION RECORD
-                            # ==================================================
+                requested_keys.add(key)
 
-                            existing_item = existing_blueprints.get(
-                                question_key
-                            )
-                            
-                            # ==================================================
-                            # 1A. UPDATE EXISTING RECORD WHEN GRADE CHANGES
-                            #
-                            # Existing:
-                            # version 1
-                            # grade 25
-                            # section 19
-                            # subsection 29
-                            # question 20
-                            #
-                            # Request:
-                            # version 1
-                            # grade 29
-                            # section 19
-                            # subsection 29
-                            # question 20
-                            #
-                            # Same hierarchy -> update grade.
-                            # ==================================================
+            # ==============================================================
+            # STEP 11D:
+            # FIND RECORDS THAT MUST BE DELETED
+            #
+            # IMPORTANT:
+            #
+            # If an old combination is not present in the new PUT request,
+            # it means the hierarchy was changed or removed.
+            #
+            # Therefore DELETE it.
+            # ==============================================================
 
-                            if not existing_item:
+            existing_keys = set(existing_map.keys())
 
-                                for item in existing_blueprint_qs:
+            keys_to_delete = (
+                existing_keys - requested_keys
+            )
 
-                                    if (
-                                        item.section_id == section_id
-                                        and item.subsection_id == subsection_id
-                                        and item.question_id == question_id
-                                        and item.board == board
-                                    ):
-                                        existing_item = item
+            if keys_to_delete:
+                logger.info(f"Items to delete: {len(keys_to_delete)}")
 
-                                        # Remove old dictionary key
-                                        existing_blueprints.pop(
-                                            (
-                                                version_id,
-                                                item.grade_id,
-                                                item.board,
-                                                item.section_id,
-                                                item.subsection_id,
-                                                item.question_id,
-                                            ),
-                                            None
-                                        )
+                ids_to_delete = [
+                    existing_map[key].id
+                    for key in keys_to_delete
+                ]
 
-                                        break
+                logger.info(f"Deleting IDs: {ids_to_delete}")
 
-                            # ==================================================
-                            # 2. EXISTING SUBSECTION-ONLY RECORD
-                            # ==================================================
+                AssessmentBlueprintItem.objects.filter(
+                    id__in=ids_to_delete
+                ).delete()
 
-                            if not existing_item:
+            # ==============================================================
+            # STEP 11E:
+            # UPDATE EXISTING EXACT MATCHES
+            # CREATE NEW COMBINATIONS
+            # ==============================================================
 
-                                subsection_key = (
-                                    version_id,
-                                    grade_id,
-                                    board,
-                                    section_id,
-                                    subsection_id,
-                                    None,
-                                )
+            new_blueprint_objects = []
 
-                                existing_subsection_item = (
-                                    existing_blueprints.get(
-                                        subsection_key
-                                    )
-                                )
+            update_blueprint_objects = []
 
-                                if existing_subsection_item:
+            sequence_no = 1
 
-                                    existing_item = existing_subsection_item
+            for item_data in requested_items:
 
-                                    existing_blueprints.pop(
-                                        subsection_key,
-                                        None
-                                    )
+                key = (
+                    item_data["grade_id"],
+                    item_data["board"],
+                    item_data["section_id"],
+                    item_data["subsection_id"],
+                    item_data["question_id"],
+                )
 
-                            # ==================================================
-                            # 3. EXISTING SECTION-ONLY RECORD
-                            # ==================================================
+                grade = grades.get(
+                    item_data["grade_id"]
+                )
 
-                            if not existing_item:
+                section = sections.get(
+                    item_data["section_id"]
+                )
 
-                                section_key = (
-                                    version_id,
-                                    grade_id,
-                                    board,
-                                    section_id,
-                                    None,
-                                    None,
-                                )
+                subsection = subsections.get(
+                    item_data["subsection_id"]
+                )
 
-                                existing_section_item = (
-                                    existing_blueprints.get(
-                                        section_key
-                                    )
-                                )
+                question = questions.get(
+                    item_data["question_id"]
+                )
 
-                                if existing_section_item:
+                # ==========================================================
+                # EXISTING EXACT COMBINATION
+                #
+                # ONLY UPDATE
+                # ==========================================================
 
-                                    existing_item = existing_section_item
+                existing_item = existing_map.get(
+                    key
+                )
 
-                                    existing_blueprints.pop(
-                                        section_key,
-                                        None
-                                    )
+                if existing_item:
 
-                            # ==================================================
-                            # 4. EXISTING GRADE-ONLY RECORD
-                            #
-                            # THIS IS THE IMPORTANT FIX
-                            #
-                            # Existing:
-                            #
-                            # Grade 11
-                            # Board CBSE
-                            # Section NULL
-                            # SubSection NULL
-                            # Question NULL
-                            #
-                            # Request:
-                            #
-                            # Grade 11
-                            # Board CBSE
-                            # Section Aptitude
-                            # SubSection Logical Reasoning
-                            # Question 1
-                            #
-                            # Reuse the existing grade-only row.
-                            # ==================================================
+                    existing_item.grade = grade
 
-                            if not existing_item:
+                    existing_item.board = (
+                        item_data["board"]
+                    )
 
-                                grade_only_key = (
-                                    version_id,
-                                    grade_id,
-                                    board,
-                                    None,
-                                    None,
-                                    None,
-                                )
+                    existing_item.section = section
 
-                                existing_grade_item = (
-                                    existing_blueprints.get(
-                                        grade_only_key
-                                    )
-                                )
+                    existing_item.subsection = subsection
 
-                                if existing_grade_item:
+                    existing_item.question = question
 
-                                    existing_item = existing_grade_item
+                    existing_item.sequence_no = sequence_no
 
-                                    existing_blueprints.pop(
-                                        grade_only_key,
-                                        None
-                                    )
+                    existing_item.marks_override = (
+                        item_data["marks_override"]
+                    )
 
-                            # ==================================================
-                            # 5. REUSE EMPTY RECORD
-                            # ==================================================
+                    existing_item.negative_marks_override = (
+                        item_data["negative_marks_override"]
+                    )
 
-                            if not existing_item:
+                    existing_item.status = blueprint_status
 
-                                existing_item = (
-                                    get_reusable_empty_blueprint()
-                                )
+                    update_blueprint_objects.append(
+                        existing_item
+                    )
 
-                            # ==================================================
-                            # 6. UPDATE EXISTING RECORD
-                            # ==================================================
+                # ==========================================================
+                # NEW COMBINATION
+                #
+                # CREATE NEW ROW
+                # ==========================================================
 
-                            if existing_item:
-                                
-                                used_blueprint_ids.add(existing_item.id)
+                else:
 
-                                existing_item.grade = grade
-                                existing_item.board = board
-                                existing_item.section = section
-                                existing_item.subsection = subsection
-                                existing_item.question = question
+                    new_blueprint_objects.append(
+                        AssessmentBlueprintItem(
+                            assessment_version=version,
 
-                                existing_item.sequence_no = sequence_no
+                            grade=grade,
 
-                                existing_item.marks_override = (
-                                    subsection_data.get(
-                                        "marks_override"
-                                    )
-                                )
+                            board=item_data["board"],
 
-                                existing_item.negative_marks_override = (
-                                    subsection_data.get(
-                                        "negative_marks_override"
-                                    )
-                                )
+                            section=section,
 
-                                # IMPORTANT:
-                                # draft  -> DRAFT
-                                # publish -> ACTIVE
-                                existing_item.status = blueprint_status
+                            subsection=subsection,
 
-                                update_blueprint_objects.append(
-                                    existing_item
-                                )
+                            question=question,
 
-                                # Add the NEW combination to dictionary
-                                existing_blueprints[
-                                    question_key
-                                ] = existing_item
+                            sequence_no=sequence_no,
 
-                            # ==================================================
-                            # 7. CREATE ONLY IF NOTHING EXISTS
-                            # ==================================================
+                            marks_override=(
+                                item_data["marks_override"]
+                            ),
 
-                            else:
+                            negative_marks_override=(
+                                item_data[
+                                    "negative_marks_override"
+                                ]
+                            ),
 
-                                new_blueprint_objects.append(
-                                    AssessmentBlueprintItem(
-                                        assessment_version=version,
-                                        grade=grade,
-                                        board=board,
-                                        section=section,
-                                        subsection=subsection,
-                                        question=question,
-                                        sequence_no=sequence_no,
+                            status=blueprint_status,
+                        )
+                    )
 
-                                        marks_override=(
-                                            subsection_data.get(
-                                                "marks_override"
-                                            )
-                                        ),
+                sequence_no += 1
 
-                                        negative_marks_override=(
-                                            subsection_data.get(
-                                                "negative_marks_override"
-                                            )
-                                        ),
+            logger.info(f"New items to create: {len(new_blueprint_objects)}")
+            logger.info(f"Items to update: {len(update_blueprint_objects)}")
 
-                                        status=blueprint_status,
-                                    )
-                                )
-
-                            sequence_no += 1
-            
-            
-            # ==================================================
+            # ==============================================================
             # STEP 12:
-            # BULK CREATE NEW RECORDS
-            # ==================================================
+            # BULK CREATE
+            # ==============================================================
 
             if new_blueprint_objects:
 
@@ -6629,17 +9570,18 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                     new_blueprint_objects,
                     batch_size=500
                 )
+                logger.info(f"Created {len(new_blueprint_objects)} blueprint items")
 
-
-            # ==================================================
+            # ==============================================================
             # STEP 13:
-            # BULK UPDATE EXISTING RECORDS
-            # ==================================================
+            # BULK UPDATE
+            # ==============================================================
 
             if update_blueprint_objects:
 
                 AssessmentBlueprintItem.objects.bulk_update(
                     update_blueprint_objects,
+
                     fields=[
                         "grade",
                         "board",
@@ -6651,8 +9593,41 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                         "negative_marks_override",
                         "status",
                     ],
+
                     batch_size=500
                 )
+                logger.info(f"Updated {len(update_blueprint_objects)} blueprint items")
+                
+            # ==================================================
+            # GET SAVED BLUEPRINT IDS
+            # ==================================================
+
+            saved_blueprints = (
+                AssessmentBlueprintItem.objects
+                .filter(
+                    assessment_version=version
+                )
+                .select_related(
+                    "grade",
+                    "section",
+                    "subsection",
+                    "question",
+                )
+            )
+
+            blueprint_id_map = {}
+
+            for blueprint_item in saved_blueprints:
+
+                key = (
+                    blueprint_item.grade_id,
+                    blueprint_item.board,
+                    blueprint_item.section_id,
+                    blueprint_item.subsection_id,
+                    blueprint_item.question_id,
+                )
+
+                blueprint_id_map[key] = blueprint_item.id
 
             # ==================================================
             # STEP 14: UPDATE VERSION COUNTS
@@ -6702,6 +9677,12 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                 ]
             )
 
+            logger.info(f"Updated version counts:")
+            logger.info(f"  Total Sections: {version.total_sections}")
+            logger.info(f"  Total Subsections: {version.total_subsections}")
+            logger.info(f"  Total Questions: {version.total_questions}")
+            logger.info(f"  Total Marks: {version.total_marks}")
+
             # ==================================================
             # STEP 15: PUBLISH
             # ==================================================
@@ -6718,7 +9699,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                 )
 
                 if not blueprint_exists:
-
+                    logger.error("Cannot publish without blueprint questions")
                     return Response(
                         {
                             "success": False,
@@ -6751,6 +9732,8 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                     ]
                 )
 
+                logger.info(f"Version {version.id} published successfully")
+
                 assessment = version.assessment
 
                 assessment.status = (
@@ -6764,48 +9747,200 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                     ]
                 )
 
+                logger.info(f"Assessment {assessment.id} activated")
+
             # ==================================================
             # STEP 16: RESPONSE
             # ==================================================
-
-            # --------------------------------------------------
-            # Build response blueprint with question details
-            # --------------------------------------------------
 
             response_blueprint = []
 
             for grade_data in blueprint_items:
 
+                grade_id = grade_data.get("grade_id")
+
+                board = grade_data.get(
+                    "board",
+                    AssessmentBlueprintItem.Board.ALL
+                )
+
+                sections_data = grade_data.get(
+                    "sections",
+                    []
+                )
+
+                # ==================================================
+                # CASE 1: ONLY GRADE
+                #
+                # Grade exists
+                # Sections are NOT provided
+                # ==================================================
+
+                if not sections_data:
+
+                    grade_blueprint_key = (
+                        grade_id,
+                        board,
+                        None,
+                        None,
+                        None,
+                    )
+
+                    grade_blueprint_id = blueprint_id_map.get(
+                        grade_blueprint_key
+                    )
+
+                    response_blueprint.append(
+                        {
+                            "blueprint_id": grade_blueprint_id,
+                            "grade_id": grade_id,
+                            "board": board,
+                            "sections": []
+                        }
+                    )
+
+                    continue
+
+                # ==================================================
+                # GRADE + SECTION
+                # ==================================================
+
                 grade_response = {
-                    "grade_id": grade_data.get("grade_id"),
-                    "board": grade_data.get("board"),
+                    "grade_id": grade_id,
+                    "board": board,
                     "sections": []
                 }
 
-                for section_data in grade_data.get("sections", []):
+                for section_data in sections_data:
+
+                    section_id = section_data.get(
+                        "section_id"
+                    )
+
+                    subsections_data = section_data.get(
+                        "subsections",
+                        []
+                    )
+
+                    # ==================================================
+                    # CASE 2: GRADE + SECTION ONLY
+                    #
+                    # No subsections
+                    # ==================================================
+
+                    if not subsections_data:
+
+                        section_blueprint_key = (
+                            grade_id,
+                            board,
+                            section_id,
+                            None,
+                            None,
+                        )
+
+                        section_blueprint_id = blueprint_id_map.get(
+                            section_blueprint_key
+                        )
+
+                        grade_response["sections"].append(
+                            {
+                                "blueprint_id": section_blueprint_id,
+                                "section_id": section_id,
+                                "subsections": []
+                            }
+                        )
+
+                        continue
+
+                    # ==================================================
+                    # GRADE + SECTION + SUBSECTION
+                    # ==================================================
 
                     section_response = {
-                        "section_id": section_data.get("section_id"),
+                        "section_id": section_id,
                         "subsections": []
                     }
 
-                    for subsection_data in section_data.get(
-                        "subsections",
-                        []
-                    ):
+                    for subsection_data in subsections_data:
 
-                        question_details = []
+                        subsection_id = subsection_data.get(
+                            "subsection_id"
+                        )
 
-                        for question_id in subsection_data.get(
-                            "question_ids",
+                        questions_data = subsection_data.get(
+                            "questions",
                             []
-                        ):
+                        )
 
-                            question = questions.get(question_id)
+                        # ==================================================
+                        # CASE 3: GRADE + SECTION + SUBSECTION ONLY
+                        #
+                        # No questions
+                        # ==================================================
 
-                            question_details.append(
+                        if not questions_data:
+
+                            subsection_blueprint_key = (
+                                grade_id,
+                                board,
+                                section_id,
+                                subsection_id,
+                                None,
+                            )
+
+                            subsection_blueprint_id = (
+                                blueprint_id_map.get(
+                                    subsection_blueprint_key
+                                )
+                            )
+
+                            section_response["subsections"].append(
                                 {
-                                    "id": question_id,
+                                    "blueprint_id": subsection_blueprint_id,
+                                    "subsection_id": subsection_id,
+                                    "questions": []
+                                }
+                            )
+
+                            continue
+
+                        # ==================================================
+                        # GRADE + SECTION + SUBSECTION + QUESTION
+                        # ==================================================
+
+                        subsection_response = {
+                            "subsection_id": subsection_id,
+                            "questions": []
+                        }
+
+                        for question_item in questions_data:
+
+                            question_id = question_item.get(
+                                "question_id"
+                            )
+
+                            question = questions.get(
+                                question_id
+                            )
+
+                            question_blueprint_key = (
+                                grade_id,
+                                board,
+                                section_id,
+                                subsection_id,
+                                question_id,
+                            )
+
+                            question_blueprint_id = (
+                                blueprint_id_map.get(
+                                    question_blueprint_key
+                                )
+                            )
+
+                            subsection_response["questions"].append(
+                                {
+                                    "blueprint_id": question_blueprint_id,
+                                    "question_id": question_id,
                                     "question_text": (
                                         question.question_text
                                         if question
@@ -6813,13 +9948,6 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                                     )
                                 }
                             )
-
-                        subsection_response = {
-                            "subsection_id": subsection_data.get(
-                                "subsection_id"
-                            ),
-                            "questions": question_details
-                        }
 
                         section_response["subsections"].append(
                             subsection_response
@@ -6833,6 +9961,8 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
                     grade_response
                 )
 
+            logger.info("Blueprint updated successfully!")
+            logger.info("=" * 80)
 
             return Response(
                 {
@@ -6880,7 +10010,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
             )
 
         except IntegrityError as exc:
-
+            logger.error(f"IntegrityError: {exc}", exc_info=True)
             return Response(
                 {
                     "success": False,
@@ -6897,7 +10027,7 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
             )
 
         except Exception as exc:
-
+            logger.error(f"Unexpected error: {exc}", exc_info=True)
             return Response(
                 {
                     "success": False,
@@ -6912,6 +10042,1564 @@ class AssessmentBlueprintItemUpdateAPIView(APIView):
 
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+# class AssessmentBlueprintItemUpdateAPIView(APIView):
+#     """
+#     Update complete Assessment Blueprint for an Assessment Version.
+
+#     PUT /api/assessment-builder/blueprint/<version_id>/
+#     """
+
+#     @transaction.atomic
+#     def put(self, request, version_id):
+
+#         try:
+
+#             # ==================================================
+#             # STEP 1: GET ASSESSMENT VERSION
+#             # ==================================================
+
+#             version = (
+#                 AssessmentVersion.objects
+#                 .select_for_update()
+#                 .filter(id=version_id)
+#                 .first()
+#             )
+
+#             if not version:
+
+#                 return Response(
+#                     {
+#                         "success": False,
+#                         "message": "Assessment version not found."
+#                     },
+#                     status=status.HTTP_404_NOT_FOUND
+#                 )
+                
+#             # ==================================================
+#             # STEP 1A: GET / CREATE ASSESSMENT
+#             #
+#             # assessment.name can be:
+#             #
+#             # "1"                    -> Existing Assessment ID 1
+#             # "Aptitude Assessment"  -> Assessment name
+#             # ==================================================
+
+#             assessment_data = request.data.get(
+#                 "assessment"
+#             )
+
+#             if not assessment_data:
+
+#                 return Response(
+#                     {
+#                         "success": False,
+#                         "message": "Assessment data is required."
+#                     },
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+
+#             assessment_name = assessment_data.get(
+#                 "name"
+#             )
+
+#             if not assessment_name:
+
+#                 return Response(
+#                     {
+#                         "success": False,
+#                         "message": (
+#                             "Assessment name or ID is required."
+#                         )
+#                     },
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+
+#             assessment_name = str(
+#                 assessment_name
+#             ).strip()
+
+
+#             # ==================================================
+#             # CASE 1:
+#             # name = "1"
+#             #
+#             # Treat as existing Assessment ID
+#             # ==================================================
+
+#             if assessment_name.isdigit():
+
+#                 assessment_id = int(
+#                     assessment_name
+#                 )
+
+#                 assessment = (
+#                     Assessment.objects
+#                     .filter(
+#                         id=assessment_id
+#                     )
+#                     .first()
+#                 )
+
+#                 if not assessment:
+
+#                     return Response(
+#                         {
+#                             "success": False,
+#                             "message": (
+#                                 f"Assessment with ID "
+#                                 f"{assessment_id} not found."
+#                             )
+#                         },
+#                         status=status.HTTP_400_BAD_REQUEST
+#                     )
+
+
+#             # ==================================================
+#             # CASE 2:
+#             # name = "Aptitude Assessment"
+#             #
+#             # Find existing or create new Assessment
+#             # ==================================================
+
+#             else:
+
+#                 assessment_type = assessment_data.get(
+#                     "assessment_type"
+#                 )
+
+#                 if not assessment_type:
+
+#                     return Response(
+#                         {
+#                             "success": False,
+#                             "message": (
+#                                 "assessment_type is required "
+#                                 "when creating a new assessment."
+#                             )
+#                         },
+#                         status=status.HTTP_400_BAD_REQUEST
+#                     )
+
+#                 assessment, created = (
+#                     Assessment.objects.get_or_create(
+#                         name=assessment_name,
+#                         defaults={
+#                             "short_name": assessment_data.get(
+#                                 "short_name",
+#                                 ""
+#                             ),
+#                             "assessment_type": assessment_type,
+#                             "description": assessment_data.get(
+#                                 "description"
+#                             ),
+#                             "default_language": assessment_data.get(
+#                                 "default_language",
+#                                 "en"
+#                             ),
+#                         }
+#                     )
+#                 )
+
+#                 # ----------------------------------------------
+#                 # Update existing assessment fields
+#                 # ----------------------------------------------
+
+#                 if not created:
+
+#                     update_fields = []
+
+#                     for field in [
+#                         "short_name",
+#                         "assessment_type",
+#                         "description",
+#                         "default_language",
+#                     ]:
+
+#                         value = assessment_data.get(
+#                             field
+#                         )
+
+#                         if value is not None:
+
+#                             setattr(
+#                                 assessment,
+#                                 field,
+#                                 value
+#                             )
+
+#                             update_fields.append(
+#                                 field
+#                             )
+
+#                     if update_fields:
+
+#                         assessment.save(
+#                             update_fields=update_fields
+#                         )
+
+
+#             # ==================================================
+#             # STEP 1B:
+#             # Attach Assessment to this Version
+#             #
+#             # ALSO UPDATE VERSION FIELDS IF SENT
+#             # ==================================================
+
+#             version_update_fields = []
+
+#             # --------------------------------------------------
+#             # Attach Assessment
+#             # --------------------------------------------------
+
+#             if version.assessment_id != assessment.id:
+
+#                 version.assessment = assessment
+
+#                 version_update_fields.append(
+#                     "assessment"
+#                 )
+
+
+#             # --------------------------------------------------
+#             # Update Assessment Version fields
+#             #
+#             # Only update fields that are provided.
+#             # Existing logic is not changed.
+#             # --------------------------------------------------
+
+#             version_data = request.data.get(
+#                 "version"
+#             )
+
+#             if version_data:
+
+#                 version_field_mapping = {
+#                     "version_number": "version_number",
+#                     "version_name": "version_name",
+#                     "report_template_id": "report_template",
+#                     "release_date": "release_date",
+#                     "effective_from": "effective_from",
+#                     "effective_to": "effective_to",
+#                     "duration_minutes": "duration_minutes",
+#                     "allow_resume": "allow_resume",
+#                     "allow_review": "allow_review",
+#                     "randomize_sections": "randomize_sections",
+#                     "show_result_immediately": "show_result_immediately",
+#                     "instructions": "instructions",
+#                 }
+
+#                 for request_field, model_field in version_field_mapping.items():
+
+#                     if request_field not in version_data:
+#                         continue
+
+#                     value = version_data.get(
+#                         request_field
+#                     )
+
+#                     # ----------------------------------------------
+#                     # Foreign Key: report_template_id
+#                     # ----------------------------------------------
+
+#                     if request_field == "report_template_id":
+
+#                         if value is not None:
+
+#                             report_template = (
+#                                 ReportTemplate.objects
+#                                 .filter(id=value)
+#                                 .first()
+#                             )
+
+#                             if not report_template:
+
+#                                 return Response(
+#                                     {
+#                                         "success": False,
+#                                         "message": (
+#                                             f"Report template with ID "
+#                                             f"{value} not found."
+#                                         )
+#                                     },
+#                                     status=status.HTTP_400_BAD_REQUEST
+#                                 )
+
+#                             version.report_template = (
+#                                 report_template
+#                             )
+
+#                             version_update_fields.append(
+#                                 "report_template"
+#                             )
+
+#                         else:
+
+#                             version.report_template = None
+
+#                             version_update_fields.append(
+#                                 "report_template"
+#                             )
+
+#                     # ----------------------------------------------
+#                     # Normal fields
+#                     # ----------------------------------------------
+
+#                     else:
+
+#                         setattr(
+#                             version,
+#                             model_field,
+#                             value
+#                         )
+
+#                         version_update_fields.append(
+#                             model_field
+#                         )
+
+
+#             # --------------------------------------------------
+#             # Save Version
+#             # --------------------------------------------------
+
+#             if version_update_fields:
+
+#                 version_update_fields.append(
+#                     "updated_at"
+#                 )
+
+#                 version.save(
+#                     update_fields=list(
+#                         set(version_update_fields)
+#                     )
+#                 )
+    
+#             # ==================================================
+#             # STEP 2: CHECK VERSION STATUS
+#             # ==================================================
+
+#             if (
+#                 version.status
+#                 == AssessmentVersion.Status.PUBLISHED
+#             ):
+
+#                 return Response(
+#                     {
+#                         "success": False,
+#                         "message": (
+#                             "Published assessment version "
+#                             "cannot be modified."
+#                         )
+#                     },
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+
+#             # ==================================================
+#             # STEP 3: GET INPUT
+#             # ==================================================
+
+#             blueprint_items = request.data.get(
+#                 "blueprint_items"
+#             )
+
+#             is_draft = request.data.get(
+#                 "is_draft",
+#                 True
+#             )
+            
+#             blueprint_status = (
+#                 AssessmentBlueprintItem.Status.DRAFT
+#                 if is_draft
+#                 else AssessmentBlueprintItem.Status.ACTIVE
+#             )
+
+#             # --------------------------------------------------
+#             # If blueprint_items are not provided
+#             # --------------------------------------------------
+#             #
+#             # Draft:
+#             #     Allow update without blueprint_items.
+#             #
+#             # Publish:
+#             #     blueprint_items are required.
+#             # --------------------------------------------------
+
+#             if not blueprint_items:
+
+#                 if not is_draft:
+
+#                     return Response(
+#                         {
+#                             "success": False,
+#                             "message": (
+#                                 "blueprint_items is required "
+#                                 "when publishing."
+#                             )
+#                         },
+#                         status=status.HTTP_400_BAD_REQUEST
+#                     )
+
+#                 # --------------------------------------------------
+#                 # Draft update without blueprint
+#                 #
+#                 # Do not change existing blueprint.
+#                 # Simply continue and return success.
+#                 # --------------------------------------------------
+
+#                 return Response(
+#                     {
+#                         "success": True,
+
+#                         "message": (
+#                             "Assessment draft updated successfully."
+#                         ),
+
+#                         "data": {
+#                             "assessment_version": {
+#                                 "id": version.id,
+
+#                                 "public_id": str(
+#                                     version.public_id
+#                                 ),
+
+#                                 "version_number":
+#                                     version.version_number,
+
+#                                 "status":
+#                                     version.status,
+
+#                                 "total_sections":
+#                                     version.total_sections,
+
+#                                 "total_subsections":
+#                                     version.total_subsections,
+
+#                                 "total_questions":
+#                                     version.total_questions,
+
+#                                 "total_marks":
+#                                     version.total_marks,
+#                             },
+
+#                             "blueprint": None
+#                         }
+#                     },
+#                     status=status.HTTP_200_OK
+#                 )
+
+#             # ==================================================
+#             # STEP 4: PUBLISH VALIDATION
+#             # ==================================================
+
+#             if not is_draft:
+
+#                 for grade_data in blueprint_items:
+
+#                     # ------------------------------------------
+#                     # GRADE
+#                     # ------------------------------------------
+
+#                     if not grade_data.get("grade_id"):
+
+#                         return Response(
+#                             {
+#                                 "success": False,
+#                                 "message": (
+#                                     "Grade ID is required "
+#                                     "when publishing."
+#                                 )
+#                             },
+#                             status=status.HTTP_400_BAD_REQUEST
+#                         )
+
+#                     # ------------------------------------------
+#                     # BOARD
+#                     # ------------------------------------------
+
+#                     if not grade_data.get("board"):
+
+#                         return Response(
+#                             {
+#                                 "success": False,
+#                                 "message": (
+#                                     "Board is required "
+#                                     "when publishing."
+#                                 )
+#                             },
+#                             status=status.HTTP_400_BAD_REQUEST
+#                         )
+
+#                     # ------------------------------------------
+#                     # SECTIONS
+#                     # ------------------------------------------
+
+#                     if not grade_data.get("sections"):
+
+#                         return Response(
+#                             {
+#                                 "success": False,
+#                                 "message": (
+#                                     "Sections are required "
+#                                     "when publishing."
+#                                 )
+#                             },
+#                             status=status.HTTP_400_BAD_REQUEST
+#                         )
+
+#                     for section_data in grade_data["sections"]:
+
+#                         # --------------------------------------
+#                         # SUBSECTIONS
+#                         # --------------------------------------
+
+#                         if not section_data.get("subsections"):
+
+#                             return Response(
+#                                 {
+#                                     "success": False,
+#                                     "message": (
+#                                         "SubSections are required "
+#                                         "when publishing."
+#                                     )
+#                                 },
+#                                 status=status.HTTP_400_BAD_REQUEST
+#                             )
+
+#                         for subsection_data in section_data[
+#                             "subsections"
+#                         ]:
+
+#                             # ----------------------------------
+#                             # QUESTIONS
+#                             # ----------------------------------
+
+#                             if not subsection_data.get("questions"):
+
+#                                 return Response(
+#                                     {
+#                                         "success": False,
+#                                         "message": (
+#                                             "Question IDs are required "
+#                                             "when publishing."
+#                                         )
+#                                     },
+#                                     status=status.HTTP_400_BAD_REQUEST
+#                                 )
+
+#             # ==================================================
+#             # STEP 5: COLLECT IDS
+#             # ==================================================
+
+#             grade_ids = set()
+#             section_ids = set()
+#             subsection_ids = set()
+#             question_ids = set()
+
+#             for grade_data in blueprint_items:
+
+#                 grade_id = grade_data.get("grade_id")
+
+#                 if grade_id:
+#                     grade_ids.add(grade_id)
+
+#                 for section_data in grade_data.get(
+#                     "sections",
+#                     []
+#                 ):
+
+#                     section_id = section_data.get(
+#                         "section_id"
+#                     )
+
+#                     if section_id:
+#                         section_ids.add(section_id)
+
+#                     for subsection_data in section_data.get(
+#                         "subsections",
+#                         []
+#                     ):
+
+#                         subsection_id = subsection_data.get(
+#                             "subsection_id"
+#                         )
+
+#                         if subsection_id:
+#                             subsection_ids.add(
+#                                 subsection_id
+#                             )
+
+#                         question_ids.update(
+#                             q.get("question_id")
+#                             for q in subsection_data.get("questions", [])
+#                             if isinstance(q, dict) and q.get("question_id")
+#                         )
+
+#             # ==================================================
+#             # STEP 6: FETCH MASTER DATA
+#             # ==================================================
+
+#             grades = {
+#                 obj.id: obj
+#                 for obj in Grade.objects.filter(
+#                     id__in=grade_ids
+#                 )
+#             }
+
+#             sections = {
+#                 obj.id: obj
+#                 for obj in Section.objects.filter(
+#                     id__in=section_ids
+#                 )
+#             }
+
+#             subsections = {
+#                 obj.id: obj
+#                 for obj in SubSection.objects.filter(
+#                     id__in=subsection_ids
+#                 )
+#             }
+
+#             questions = {
+#                 obj.id: obj
+#                 for obj in Question.objects.filter(
+#                     id__in=question_ids
+#                 )
+#             }
+
+#             # ==================================================
+#             # STEP 7: VALIDATE MASTER IDS
+#             # ==================================================
+
+#             missing_grades = (
+#                 grade_ids - set(grades.keys())
+#             )
+
+#             if missing_grades:
+
+#                 return Response(
+#                     {
+#                         "success": False,
+#                         "message": (
+#                             f"Invalid Grade IDs: "
+#                             f"{sorted(missing_grades)}"
+#                         )
+#                     },
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+
+#             missing_sections = (
+#                 section_ids - set(sections.keys())
+#             )
+
+#             if missing_sections:
+
+#                 return Response(
+#                     {
+#                         "success": False,
+#                         "message": (
+#                             f"Invalid Section IDs: "
+#                             f"{sorted(missing_sections)}"
+#                         )
+#                     },
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+
+#             missing_subsections = (
+#                 subsection_ids
+#                 - set(subsections.keys())
+#             )
+
+#             if missing_subsections:
+
+#                 return Response(
+#                     {
+#                         "success": False,
+#                         "message": (
+#                             f"Invalid SubSection IDs: "
+#                             f"{sorted(missing_subsections)}"
+#                         )
+#                     },
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+
+#             missing_questions = (
+#                 question_ids
+#                 - set(questions.keys())
+#             )
+
+#             if missing_questions:
+
+#                 return Response(
+#                     {
+#                         "success": False,
+#                         "message": (
+#                             f"Invalid Question IDs: "
+#                             f"{sorted(missing_questions)}"
+#                         )
+#                     },
+#                     status=status.HTTP_400_BAD_REQUEST
+#                 )
+
+#             # ==================================================
+#             # STEP 8:
+#             # DUPLICATE QUESTION VALIDATION
+#             #
+#             # Same question CAN be used for different grades.
+#             #
+#             # Allowed:
+#             #
+#             # Grade 25 + Section 19 + SubSection 29 + Question 20
+#             # Grade 29 + Section 20 + SubSection 29 + Question 20
+#             #
+#             # Not allowed:
+#             #
+#             # Grade 25 + Section 19 + SubSection 29 + Question 20
+#             # Grade 25 + Section 19 + SubSection 29 + Question 20
+#             # ==================================================
+
+#             assigned_questions = set()
+
+#             for grade_data in blueprint_items:
+
+#                 grade_id = grade_data.get(
+#                     "grade_id"
+#                 )
+
+#                 for section_data in grade_data.get(
+#                     "sections",
+#                     []
+#                 ):
+
+#                     section_id = section_data.get(
+#                         "section_id"
+#                     )
+
+#                     for subsection_data in section_data.get(
+#                         "subsections",
+#                         []
+#                     ):
+
+#                         subsection_id = subsection_data.get(
+#                             "subsection_id"
+#                         )
+
+#                         for question_item in subsection_data.get(
+#                             "questions",
+#                             []
+#                         ):
+#                             question_id = question_item.get("question_id")
+
+#                             if not question_id:
+#                                 continue
+
+#                             assignment_key = (
+#                                 grade_id,
+#                                 section_id,
+#                                 subsection_id,
+#                                 question_id,
+#                             )
+
+#                             if assignment_key in assigned_questions:
+
+#                                 return Response(
+#                                     {
+#                                         "success": False,
+#                                         "message": (
+#                                             f"Question {question_id} "
+#                                             f"is already assigned to "
+#                                             f"Grade {grade_id}, "
+#                                             f"Section {section_id}, "
+#                                             f"SubSection {subsection_id}."
+#                                         )
+#                                     },
+#                                     status=status.HTTP_400_BAD_REQUEST
+#                                 )
+
+#                             assigned_questions.add(
+#                                 assignment_key
+#                             )
+
+#             # ==================================================
+#             # STEP 9:
+#             # VALIDATE HIERARCHY
+#             #
+#             # Question does NOT contain subsection_id.
+#             #
+#             # Relationship:
+#             #
+#             # Grade
+#             #   ↓
+#             # Section
+#             #   ↓
+#             # SubSection
+#             #   ↓
+#             # Blueprint Item
+#             #   ↓
+#             # Question
+#             # ==================================================
+
+#             for grade_data in blueprint_items:
+
+#                 grade_id = grade_data.get("grade_id")
+
+#                 grade = grades.get(grade_id)
+
+#                 if not grade:
+
+#                     return Response(
+#                         {
+#                             "success": False,
+#                             "message": (
+#                                 f"Grade {grade_id} not found."
+#                             )
+#                         },
+#                         status=status.HTTP_400_BAD_REQUEST
+#                     )
+
+#                 # --------------------------------------------------
+#                 # Sections
+#                 # --------------------------------------------------
+
+#                 for section_data in grade_data.get(
+#                     "sections",
+#                     []
+#                 ):
+
+#                     section_id = section_data.get(
+#                         "section_id"
+#                     )
+
+#                     section = sections.get(
+#                         section_id
+#                     )
+
+#                     if not section:
+
+#                         return Response(
+#                             {
+#                                 "success": False,
+#                                 "message": (
+#                                     f"Section {section_id} "
+#                                     f"not found."
+#                                 )
+#                             },
+#                             status=status.HTTP_400_BAD_REQUEST
+#                         )
+
+#                     # --------------------------------------------------
+#                     # SubSections
+#                     # --------------------------------------------------
+
+#                     for subsection_data in section_data.get(
+#                         "subsections",
+#                         []
+#                     ):
+
+#                         subsection_id = subsection_data.get(
+#                             "subsection_id"
+#                         )
+
+#                         subsection = subsections.get(
+#                             subsection_id
+#                         )
+
+#                         if not subsection:
+
+#                             return Response(
+#                                 {
+#                                     "success": False,
+#                                     "message": (
+#                                         f"SubSection "
+#                                         f"{subsection_id} "
+#                                         f"not found."
+#                                     )
+#                                 },
+#                                 status=status.HTTP_400_BAD_REQUEST
+#                             )
+
+#                        # --------------------------------------------------
+#                         # Questions
+#                         #
+#                         # Question does NOT have subsection_id.
+#                         # Therefore, only validate that the question exists.
+#                         # --------------------------------------------------
+
+#                         for question_item in subsection_data.get("questions", []):
+
+#                             question_id = question_item.get("question_id")
+
+#                             if not question_id:
+#                                 continue
+
+#                             question = questions.get(question_id)
+
+#                             if not question:
+
+#                                 return Response(
+#                                     {
+#                                         "success": False,
+#                                         "message": (
+#                                             f"Question {question_id} not found."
+#                                         )
+#                                     },
+#                                     status=status.HTTP_400_BAD_REQUEST
+#                                 )
+
+#             # ==================================================
+#             # STEP 10:
+#             # QUESTION -> GRADE MAPPING
+#             # ==================================================
+
+#             question_grade_mappings = set(
+#                 QuestionGradeMapping.objects.filter(
+#                     question_id__in=question_ids,
+#                     grade_id__in=grade_ids,
+#                 ).values_list(
+#                     "question_id",
+#                     "grade_id",
+#                 )
+#             )
+
+#             for grade_data in blueprint_items:
+
+#                 grade_id = grade_data.get("grade_id")
+
+#                 for section_data in grade_data.get(
+#                     "sections",
+#                     []
+#                 ):
+
+#                     for subsection_data in section_data.get(
+#                         "subsections",
+#                         []
+#                     ):
+
+#                         for question_item in subsection_data.get(
+#                             "questions",
+#                             []
+#                         ):
+
+#                             question_id = question_item.get(
+#                                 "question_id"
+#                             )
+
+#                             if not question_id:
+#                                 continue
+
+#                             if (
+#                                 question_id,
+#                                 grade_id
+#                             ) not in question_grade_mappings:
+
+#                                 return Response(
+#                                     {
+#                                         "success": False,
+#                                         "message": (
+#                                             f"Question {question_id} "
+#                                             f"is not mapped to Grade "
+#                                             f"{grade_id}."
+#                                         )
+#                                     },
+#                                     status=status.HTTP_400_BAD_REQUEST
+#                                 )
+
+#                         # ==================================================
+#             # STEP 11:
+#             # DELETE ONLY THE BLUEPRINT ROWS FOR GRADES PRESENT
+#             # IN THIS REQUEST, THEN RECREATE THEM.
+#             #
+#             # IMPORTANT:
+#             # - Only rows for grade_ids in the incoming request
+#             #   are removed. Blueprint rows for grades NOT
+#             #   mentioned in this request are left untouched.
+#             # - This avoids wiping the entire version's
+#             #   blueprint on every save, while still ensuring
+#             #   grade/section/subsection/question changes
+#             #   result in a clean delete + recreate for that
+#             #   grade's subtree (no stale duplicate rows).
+#             # ==================================================
+
+#             AssessmentBlueprintItem.objects.filter(
+#                 assessment_version=version,
+#                 grade_id__in=grade_ids,
+#             ).delete()
+
+
+#             # ==================================================
+#             # STEP 12:
+#             # CREATE NEW BLUEPRINT ITEMS FOR SUBMITTED GRADES
+#             # ==================================================
+
+#             new_blueprint_objects = []
+
+#             sequence_no = 1
+
+
+#             for grade_data in blueprint_items:
+
+#                 grade_id = grade_data.get("grade_id")
+
+#                 grade = grades.get(grade_id)
+
+#                 if not grade:
+#                     return Response(
+#                         {
+#                             "success": False,
+#                             "message": f"Grade {grade_id} not found."
+#                         },
+#                         status=status.HTTP_400_BAD_REQUEST
+#                     )
+
+#                 board = grade_data.get(
+#                     "board",
+#                     AssessmentBlueprintItem.Board.ALL
+#                 )
+
+#                 sections_data = grade_data.get(
+#                     "sections",
+#                     []
+#                 )
+
+#                 if not sections_data:
+
+#                     new_blueprint_objects.append(
+#                         AssessmentBlueprintItem(
+#                             assessment_version=version,
+#                             grade=grade,
+#                             board=board,
+#                             section=None,
+#                             subsection=None,
+#                             question=None,
+#                             sequence_no=sequence_no,
+#                             marks_override=grade_data.get(
+#                                 "marks_override"
+#                             ),
+#                             negative_marks_override=grade_data.get(
+#                                 "negative_marks_override"
+#                             ),
+#                             status=blueprint_status,
+#                         )
+#                     )
+
+#                     sequence_no += 1
+#                     continue
+
+#                 for section_data in sections_data:
+
+#                     section_id = section_data.get("section_id")
+#                     section = sections.get(section_id)
+
+#                     if not section:
+#                         return Response(
+#                             {
+#                                 "success": False,
+#                                 "message": (
+#                                     f"Section {section_id} not found."
+#                                 )
+#                             },
+#                             status=status.HTTP_400_BAD_REQUEST
+#                         )
+
+#                     subsections_data = section_data.get(
+#                         "subsections",
+#                         []
+#                     )
+
+#                     if not subsections_data:
+
+#                         new_blueprint_objects.append(
+#                             AssessmentBlueprintItem(
+#                                 assessment_version=version,
+#                                 grade=grade,
+#                                 board=board,
+#                                 section=section,
+#                                 subsection=None,
+#                                 question=None,
+#                                 sequence_no=sequence_no,
+#                                 marks_override=section_data.get(
+#                                     "marks_override"
+#                                 ),
+#                                 negative_marks_override=section_data.get(
+#                                     "negative_marks_override"
+#                                 ),
+#                                 status=blueprint_status,
+#                             )
+#                         )
+
+#                         sequence_no += 1
+#                         continue
+
+#                     for subsection_data in subsections_data:
+
+#                         subsection_id = subsection_data.get(
+#                             "subsection_id"
+#                         )
+#                         subsection = subsections.get(subsection_id)
+
+#                         if not subsection:
+#                             return Response(
+#                                 {
+#                                     "success": False,
+#                                     "message": (
+#                                         f"SubSection {subsection_id} "
+#                                         f"not found."
+#                                     )
+#                                 },
+#                                 status=status.HTTP_400_BAD_REQUEST
+#                             )
+
+#                         questions_data = subsection_data.get(
+#                             "questions",
+#                             []
+#                         )
+
+#                         question_list = [
+#                             q.get("question_id")
+#                             for q in questions_data
+#                             if (
+#                                 isinstance(q, dict)
+#                                 and q.get("question_id")
+#                             )
+#                         ]
+
+#                         if not question_list:
+
+#                             new_blueprint_objects.append(
+#                                 AssessmentBlueprintItem(
+#                                     assessment_version=version,
+#                                     grade=grade,
+#                                     board=board,
+#                                     section=section,
+#                                     subsection=subsection,
+#                                     question=None,
+#                                     sequence_no=sequence_no,
+#                                     marks_override=subsection_data.get(
+#                                         "marks_override"
+#                                     ),
+#                                     negative_marks_override=(
+#                                         subsection_data.get(
+#                                             "negative_marks_override"
+#                                         )
+#                                     ),
+#                                     status=blueprint_status,
+#                                 )
+#                             )
+
+#                             sequence_no += 1
+#                             continue
+
+#                         for question_id in question_list:
+
+#                             question = questions.get(question_id)
+
+#                             if not question:
+#                                 return Response(
+#                                     {
+#                                         "success": False,
+#                                         "message": (
+#                                             f"Question {question_id} "
+#                                             f"not found."
+#                                         )
+#                                     },
+#                                     status=status.HTTP_400_BAD_REQUEST
+#                                 )
+
+#                             new_blueprint_objects.append(
+#                                 AssessmentBlueprintItem(
+#                                     assessment_version=version,
+#                                     grade=grade,
+#                                     board=board,
+#                                     section=section,
+#                                     subsection=subsection,
+#                                     question=question,
+#                                     sequence_no=sequence_no,
+#                                     marks_override=(
+#                                         subsection_data.get(
+#                                             "marks_override"
+#                                         )
+#                                     ),
+#                                     negative_marks_override=(
+#                                         subsection_data.get(
+#                                             "negative_marks_override"
+#                                         )
+#                                     ),
+#                                     status=blueprint_status,
+#                                 )
+#                             )
+
+#                             sequence_no += 1
+
+
+#             # ==================================================
+#             # STEP 13:
+#             # BULK CREATE NEW BLUEPRINT
+#             # ==================================================
+
+#             if new_blueprint_objects:
+
+#                 AssessmentBlueprintItem.objects.bulk_create(
+#                     new_blueprint_objects,
+#                     batch_size=500
+#                 )
+
+#             # ==================================================
+#             # STEP 14: UPDATE VERSION COUNTS
+#             # ==================================================
+
+#             blueprint_qs = (
+#                 AssessmentBlueprintItem.objects
+#                 .filter(
+#                     assessment_version=version,
+#                     question__isnull=False
+#                 )
+#             )
+
+#             version.total_sections = (
+#                 blueprint_qs
+#                 .values("section_id")
+#                 .distinct()
+#                 .count()
+#             )
+
+#             version.total_subsections = (
+#                 blueprint_qs
+#                 .values("subsection_id")
+#                 .distinct()
+#                 .count()
+#             )
+
+#             version.total_questions = (
+#                 blueprint_qs.count()
+#             )
+
+#             version.total_marks = (
+#                 blueprint_qs
+#                 .aggregate(
+#                     total=Sum("marks_override")
+#                 )["total"]
+#                 or Decimal("0")
+#             )
+
+#             version.save(
+#                 update_fields=[
+#                     "total_sections",
+#                     "total_subsections",
+#                     "total_questions",
+#                     "total_marks",
+#                     "updated_at",
+#                 ]
+#             )
+
+#             # ==================================================
+#             # STEP 15: PUBLISH
+#             # ==================================================
+
+#             if not is_draft:
+
+#                 blueprint_exists = (
+#                     AssessmentBlueprintItem.objects
+#                     .filter(
+#                         assessment_version=version,
+#                         question__isnull=False
+#                     )
+#                     .exists()
+#                 )
+
+#                 if not blueprint_exists:
+
+#                     return Response(
+#                         {
+#                             "success": False,
+#                             "message": (
+#                                 "Cannot publish assessment "
+#                                 "without blueprint questions."
+#                             )
+#                         },
+#                         status=status.HTTP_400_BAD_REQUEST
+#                     )
+
+#                 version.status = (
+#                     AssessmentVersion.Status.PUBLISHED
+#                 )
+
+#                 version.published_by = (
+#                     request.user
+#                     if request.user.is_authenticated
+#                     else None
+#                 )
+
+#                 version.published_at = timezone.now()
+
+#                 version.save(
+#                     update_fields=[
+#                         "status",
+#                         "published_by",
+#                         "published_at",
+#                         "updated_at",
+#                     ]
+#                 )
+
+#                 assessment = version.assessment
+
+#                 assessment.status = (
+#                     Assessment.Status.ACTIVE
+#                 )
+
+#                 assessment.save(
+#                     update_fields=[
+#                         "status",
+#                         "updated_at",
+#                     ]
+#                 )
+
+#             # ==================================================
+#             # STEP 16: RESPONSE
+#             # ==================================================
+
+#             # --------------------------------------------------
+#             # Get created blueprint records for this version
+#             # --------------------------------------------------
+
+#             created_blueprints = (
+#                 AssessmentBlueprintItem.objects
+#                 .filter(
+#                     assessment_version=version
+#                 )
+#                 .select_related(
+#                     "grade",
+#                     "section",
+#                     "subsection",
+#                     "question",
+#                 )
+#                 .order_by("sequence_no")
+#             )
+
+
+#             # --------------------------------------------------
+#             # Build response blueprint
+#             # --------------------------------------------------
+
+#             response_blueprint = []
+
+#             for blueprint in created_blueprints:
+
+#                 # ----------------------------------------------
+#                 # Find existing grade response
+#                 # ----------------------------------------------
+
+#                 grade_response = next(
+#                     (
+#                         item
+#                         for item in response_blueprint
+#                         if item["grade_id"] == blueprint.grade_id
+#                     ),
+#                     None
+#                 )
+
+#                 if not grade_response:
+
+#                     grade_response = {
+#                         "grade_id": blueprint.grade_id,
+#                         "board": blueprint.board,
+#                         "sections": []
+#                     }
+
+#                     response_blueprint.append(
+#                         grade_response
+#                     )
+
+
+#                 # ----------------------------------------------
+#                 # Grade level only
+#                 # ----------------------------------------------
+
+#                 if not blueprint.section_id:
+
+#                     grade_response.setdefault(
+#                         "blueprint_items",
+#                         []
+#                     ).append(
+#                         {
+#                             "blueprint_id": blueprint.id,
+#                             "question_id": None,
+#                             "question_text": None,
+#                         }
+#                     )
+
+#                     continue
+
+
+#                 # ----------------------------------------------
+#                 # Find existing section response
+#                 # ----------------------------------------------
+
+#                 section_response = next(
+#                     (
+#                         item
+#                         for item in grade_response["sections"]
+#                         if item["section_id"] == blueprint.section_id
+#                     ),
+#                     None
+#                 )
+
+#                 if not section_response:
+
+#                     section_response = {
+#                         "section_id": blueprint.section_id,
+#                         "subsections": []
+#                     }
+
+#                     grade_response["sections"].append(
+#                         section_response
+#                     )
+
+
+#                 # ----------------------------------------------
+#                 # Section level only
+#                 # ----------------------------------------------
+
+#                 if not blueprint.subsection_id:
+
+#                     section_response.setdefault(
+#                         "blueprint_items",
+#                         []
+#                     ).append(
+#                         {
+#                             "blueprint_id": blueprint.id,
+#                             "question_id": None,
+#                             "question_text": None,
+#                         }
+#                     )
+
+#                     continue
+
+
+#                 # ----------------------------------------------
+#                 # Find existing subsection response
+#                 # ----------------------------------------------
+
+#                 subsection_response = next(
+#                     (
+#                         item
+#                         for item in section_response["subsections"]
+#                         if item["subsection_id"] == blueprint.subsection_id
+#                     ),
+#                     None
+#                 )
+
+#                 if not subsection_response:
+
+#                     subsection_response = {
+#                         "subsection_id": blueprint.subsection_id,
+#                         "questions": []
+#                     }
+
+#                     section_response["subsections"].append(
+#                         subsection_response
+#                     )
+
+
+#                 # ----------------------------------------------
+#                 # Subsection / Question
+#                 # ----------------------------------------------
+
+#                 subsection_response["questions"].append(
+#                     {
+#                         "blueprint_id": blueprint.id,
+#                         "question_id": blueprint.question_id,
+#                         "question_text": (
+#                             blueprint.question.question_text
+#                             if blueprint.question
+#                             else None
+#                         )
+#                     }
+#                 )
+
+
+#             return Response(
+#                 {
+#                     "success": True,
+
+#                     "message": (
+#                         "Assessment blueprint "
+#                         "updated successfully."
+#                     ),
+
+#                     "data": {
+
+#                         "assessment_version": {
+
+#                             "id": version.id,
+
+#                             "public_id": str(
+#                                 version.public_id
+#                             ),
+
+#                             "version_number":
+#                                 version.version_number,
+
+#                             "status":
+#                                 version.status,
+
+#                             "total_sections":
+#                                 version.total_sections,
+
+#                             "total_subsections":
+#                                 version.total_subsections,
+
+#                             "total_questions":
+#                                 version.total_questions,
+
+#                             "total_marks":
+#                                 version.total_marks,
+#                         },
+
+#                         "blueprint": response_blueprint
+#                     }
+#                 },
+
+#                 status=status.HTTP_200_OK
+#             )
+
+#         except IntegrityError as exc:
+
+#             return Response(
+#                 {
+#                     "success": False,
+
+#                     "message": (
+#                         "Blueprint could not be updated "
+#                         "because of a database constraint."
+#                     ),
+
+#                     "error": str(exc)
+#                 },
+
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
+
+#         except Exception as exc:
+
+#             return Response(
+#                 {
+#                     "success": False,
+
+#                     "message": (
+#                         "Something went wrong while "
+#                         "updating the blueprint."
+#                     ),
+
+#                     "error": str(exc)
+#                 },
+
+#                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+#             )
+
+
+
+
+
 
 class AssessmentBlueprintListAPIView(APIView):
     """
@@ -7186,6 +11874,7 @@ class QuestionsByGradeTagAPIView(APIView):
                 grade_id__in=grade_id_list,
                 tag_id__in=tag_id_list,
                 question__is_active=True,
+                question__question_status=Question.QuestionStatus.PUBLISHED,
             )
             .select_related("question")
             .order_by("question__question_code")
@@ -8056,6 +12745,86 @@ class QuestionAPIView(APIView):
                 "data": serializer.data,
             }
         )
+        
+    @transaction.atomic
+    def delete(self, request, id):
+        try:
+            # -----------------------------------------
+            # 1. Get Question
+            # -----------------------------------------
+
+            question = (
+                Question.objects
+                .select_for_update()
+                .filter(id=id)
+                .first()
+            )
+
+            if not question:
+                return Response(
+                    {
+                        "success": False,
+                        "message": "Question not found.",
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            # -----------------------------------------
+            # 2. Check if already archived
+            # -----------------------------------------
+
+            if question.question_status == Question.QuestionStatus.ARCHIVED:
+                return Response(
+                    {
+                        "success": False,
+                        "message": "Question is already archived.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # -----------------------------------------
+            # 3. Archive Question
+            # -----------------------------------------
+
+            question.question_status = Question.QuestionStatus.ARCHIVED
+            question.is_active = False
+
+            question.save(
+                update_fields=[
+                    "question_status",
+                    "is_active",
+                    "updated_at",
+                ]
+            )
+
+            # -----------------------------------------
+            # 4. Response
+            # -----------------------------------------
+
+            return Response(
+                {
+                    "success": True,
+                    "message": "Question archived successfully.",
+                    "data": {
+                        "id": question.id,
+                        "public_id": question.public_id,
+                        "question_code": question.question_code,
+                        "status": question.question_status,
+                        "is_active": question.is_active,
+                    },
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+
+            return Response(
+                {
+                    "success": False,
+                    "message": str(e),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
  
 
 class QuestionLibraryAPIView(APIView):
@@ -8228,5 +12997,1572 @@ class QuestionLibraryAPIView(APIView):
                 "message": "Question library fetched successfully.",
                 "data": serializer.data,
             }
-        )       
+        )
+        
+# ========================== Interpretation Rule API ==========================
+
+class InterpretationRuleBulkCreateAPIView(APIView):
+
+    """
+    Create interpretation rules for multiple subsections
+    under one assessment version.
+
+    POST
+    /api/v1/asse/interpretation-rules/bulk-create/
+    """
+
+    @transaction.atomic
+    def post(self, request):
+
+        serializer = InterpretationRuleBulkCreateSerializer(
+            data=request.data,
+            context={
+                "request": request
+            }
+        )
+
+        if not serializer.is_valid():
+
+            return Response(
+                {
+                    "success": False,
+                    "errors": serializer.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+
+            assessment_version = serializer.validated_data[
+                "assessment_version"
+            ]
+
+            is_draft = serializer.validated_data[
+                "is_draft"
+            ]
+
+            subsections = serializer.validated_data[
+                "subsections"
+            ]
+
+            created_rules = []
+
+            # -----------------------------------------
+            # Create rule for every subsection
+            # -----------------------------------------
+
+            for subsection_data in subsections:
+
+                subsection_id = subsection_data[
+                    "subsection_id"
+                ]
+
+                subsection = SubSection.objects.get(
+                    id=subsection_id
+                )
+
+                # Remove subsection_id before create
+                rule_data = subsection_data.copy()
+
+                rule_data.pop(
+                    "subsection_id",
+                    None
+                )
+
+                # -----------------------------------------
+                # Set status based on is_draft
+                # -----------------------------------------
+
+                if is_draft:
+
+                    rule_data["status"] = (
+                        InterpretationRule.Status.DRAFT
+                    )
+
+                else:
+
+                    rule_data["status"] = (
+                        InterpretationRule.Status.ACTIVE
+                    )
+
+                # -----------------------------------------
+                # Create Interpretation Rule
+                # -----------------------------------------
+
+                interpretation_rule = (
+                    InterpretationRule.objects.create(
+                        assessment_version=assessment_version,
+                        subsection=subsection,
+                        **rule_data
+                    )
+                )
+
+                created_rules.append(
+                    interpretation_rule
+                )
+
+            # -----------------------------------------
+            # Response
+            # -----------------------------------------
+
+            data = []
+
+            for rule in created_rules:
+
+                data.append({
+                    "id": rule.id,
+                    "public_id": str(rule.public_id),
+
+                    "assessment_version_id": (
+                        rule.assessment_version_id
+                    ),
+
+                    "subsection_id": (
+                        rule.subsection_id
+                    ),
+
+                    "subsection": (
+                        rule.subsection.name
+                        if rule.subsection
+                        else None
+                    ),
+
+                    "min_score": rule.min_score,
+                    "max_score": rule.max_score,
+
+                    "rating": rule.rating,
+                    "title": rule.title,
+
+                    "performance_analysis": (
+                        rule.performance_analysis
+                    ),
+
+                    "action_plan": (
+                        rule.action_plan
+                    ),
+
+                    "action_plan_option1": (
+                        rule.action_plan_option1
+                    ),
+
+                    "action_plan_option2": (
+                        rule.action_plan_option2
+                    ),
+
+                    "action_plan_option3": (
+                        rule.action_plan_option3
+                    ),
+
+                    "action_plan_option4": (
+                        rule.action_plan_option4
+                    ),
+
+                    "action_plan_option5": (
+                        rule.action_plan_option5
+                    ),
+
+                    "display_color": (
+                        rule.display_color
+                    ),
+
+                    "status": rule.status,
+
+                    "created_at": rule.created_at,
+                    "updated_at": rule.updated_at,
+                })
+
+            return Response(
+                {
+                    "success": True,
+                    "message": (
+                        "Interpretation rules created successfully."
+                    ),
+                    "is_draft": is_draft,
+                    "assessment_version_id": (
+                        assessment_version.id
+                    ),
+                    "total_created": len(created_rules),
+                    "data": data,
+                },
+                status=status.HTTP_201_CREATED,
+            )
+
+        except Exception as e:
+
+            transaction.set_rollback(True)
+
+            return Response(
+                {
+                    "success": False,
+                    "message": str(e),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )       
+        
+class InterpretationRuleBulkUpdateAPIView(APIView):
+
+    """
+    Bulk Update/Create Interpretation Rules.
+
+    PUT
+    /api/v1/asse/interpretation-rules/bulk/
+
+    Behavior:
+
+    id present
+        -> Update existing InterpretationRule
+
+    id absent
+        -> Create new InterpretationRule
+    """
+
+    @transaction.atomic
+    def put(self, request):
+
+        serializer = InterpretationRuleBulkUpdateSerializer(
+            data=request.data,
+            context={
+                "request": request
+            }
+        )
+
+        # ==================================================
+        # VALIDATION
+        # ==================================================
+
+        if not serializer.is_valid():
+
+            return Response(
+                {
+                    "success": False,
+                    "errors": serializer.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+
+            assessment_version = (
+                serializer.validated_data[
+                    "assessment_version"
+                ]
+            )
+
+            is_draft = (
+                serializer.validated_data[
+                    "is_draft"
+                ]
+            )
+
+            subsections = (
+                serializer.validated_data[
+                    "subsections"
+                ]
+            )
+
+            updated_rules = []
+            created_rules = []
+
+            # ==================================================
+            # PROCESS EACH SUBSECTION
+            # ==================================================
+
+            for subsection_data in subsections:
+
+                interpretation_id = (
+                    subsection_data.get("id")
+                )
+
+                subsection_id = (
+                    subsection_data[
+                        "subsection_id"
+                    ]
+                )
+
+                subsection = SubSection.objects.get(
+                    id=subsection_id
+                )
+
+                # --------------------------------------------------
+                # COPY DATA
+                # --------------------------------------------------
+
+                rule_data = subsection_data.copy()
+
+                # Remove fields which are not model fields
+                rule_data.pop(
+                    "id",
+                    None
+                )
+
+                rule_data.pop(
+                    "subsection_id",
+                    None
+                )
+
+                # ==================================================
+                # STATUS BASED ON is_draft
+                # ==================================================
+
+                if is_draft:
+
+                    rule_data["status"] = (
+                        InterpretationRule.Status.DRAFT
+                    )
+
+                else:
+
+                    rule_data["status"] = (
+                        InterpretationRule.Status.ACTIVE
+                    )
+
+                # ==================================================
+                # UPDATE EXISTING RULE
+                # ==================================================
+
+                if interpretation_id:
+
+                    try:
+
+                        interpretation_rule = (
+                            InterpretationRule.objects.select_for_update()
+                            .get(
+                                id=interpretation_id,
+                                assessment_version=assessment_version
+                            )
+                        )
+
+                    except InterpretationRule.DoesNotExist:
+
+                        return Response(
+                            {
+                                "success": False,
+                                "message": (
+                                    f"Interpretation rule "
+                                    f"with id {interpretation_id} "
+                                    f"not found for this "
+                                    f"assessment version."
+                                ),
+                            },
+                            status=status.HTTP_404_NOT_FOUND,
+                        )
+
+                    # -----------------------------------------
+                    # Update subsection also
+                    # -----------------------------------------
+
+                    interpretation_rule.subsection = (
+                        subsection
+                    )
+
+                    # -----------------------------------------
+                    # Update fields
+                    # -----------------------------------------
+
+                    for field, value in rule_data.items():
+
+                        setattr(
+                            interpretation_rule,
+                            field,
+                            value
+                        )
+
+                    interpretation_rule.save()
+
+                    updated_rules.append(
+                        interpretation_rule
+                    )
+
+                # ==================================================
+                # CREATE NEW RULE
+                # ==================================================
+
+                else:
+
+                    interpretation_rule = (
+                        InterpretationRule.objects.create(
+                            assessment_version=(
+                                assessment_version
+                            ),
+                            subsection=subsection,
+                            **rule_data
+                        )
+                    )
+
+                    created_rules.append(
+                        interpretation_rule
+                    )
+
+            # ==================================================
+            # RESPONSE DATA
+            # ==================================================
+
+            data = []
+
+            all_rules = (
+                created_rules +
+                updated_rules
+            )
+
+            for rule in all_rules:
+
+                data.append({
+
+                    "id": rule.id,
+
+                    "public_id": str(
+                        rule.public_id
+                    ),
+
+                    "assessment_version_id": (
+                        rule.assessment_version_id
+                    ),
+
+                    "subsection_id": (
+                        rule.subsection_id
+                    ),
+
+                    "subsection": (
+                        rule.subsection.name
+                        if rule.subsection
+                        else None
+                    ),
+
+                    "min_score": rule.min_score,
+
+                    "max_score": rule.max_score,
+
+                    "rating": rule.rating,
+
+                    "title": rule.title,
+
+                    "performance_analysis": (
+                        rule.performance_analysis
+                    ),
+
+                    "action_plan": (
+                        rule.action_plan
+                    ),
+
+                    "action_plan_option1": (
+                        rule.action_plan_option1
+                    ),
+
+                    "action_plan_option2": (
+                        rule.action_plan_option2
+                    ),
+
+                    "action_plan_option3": (
+                        rule.action_plan_option3
+                    ),
+
+                    "action_plan_option4": (
+                        rule.action_plan_option4
+                    ),
+
+                    "action_plan_option5": (
+                        rule.action_plan_option5
+                    ),
+
+                    "display_color": (
+                        rule.display_color
+                    ),
+
+                    "status": rule.status,
+
+                    "created_at": (
+                        rule.created_at
+                    ),
+
+                    "updated_at": (
+                        rule.updated_at
+                    ),
+                })
+
+            # ==================================================
+            # FINAL RESPONSE
+            # ==================================================
+
+            return Response(
+                {
+                    "success": True,
+
+                    "message": (
+                        "Interpretation rules processed "
+                        "successfully."
+                    ),
+
+                    "assessment_version_id": (
+                        assessment_version.id
+                    ),
+
+                    "is_draft": is_draft,
+
+                    "total_updated": (
+                        len(updated_rules)
+                    ),
+
+                    "total_created": (
+                        len(created_rules)
+                    ),
+
+                    "data": data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+
+            transaction.set_rollback(True)
+
+            return Response(
+                {
+                    "success": False,
+                    "message": str(e),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+  
+class InterpretationRuleByVersionAPIView(APIView):
+
+    """
+    Fetch Interpretation Rules by Assessment Version.
+
+    GET
+    /api/v1/asse/interpretation-rules/version/<version_id>/
+
+    Fetches:
+        Assessment Version
+            -> Section
+                -> SubSection
+                    -> Interpretation Rules
+    """
+
+    def get(self, request, version_id):
+
+        # ==============================================
+        # GET ASSESSMENT VERSION
+        # ==============================================
+
+        try:
+
+            assessment_version = (
+                AssessmentVersion.objects.get(
+                    id=version_id
+                )
+            )
+
+        except AssessmentVersion.DoesNotExist:
+
+            return Response(
+                {
+                    "success": False,
+                    "message": "Assessment version not found.",
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+
+            # ==============================================
+            # GET INTERPRETATION RULES
+            # ==============================================
+
+            rules = (
+                InterpretationRule.objects
+                .select_related(
+                    "assessment_version",
+                    "subsection",
+                )
+                .filter(
+                    assessment_version_id=version_id
+                )
+                .order_by(
+                    "subsection_id",
+                    "min_score",
+                    "id",
+                )
+            )
+
+            # ==============================================
+            # GET BLUEPRINT ITEMS FOR THIS VERSION
+            #
+            # Used to find:
+            # subsection -> section
+            # ==============================================
+
+            blueprint_items = (
+                AssessmentBlueprintItem.objects
+                .select_related(
+                    "section",
+                    "subsection",
+                )
+                .filter(
+                    assessment_version_id=version_id,
+                    section__isnull=False,
+                    subsection__isnull=False,
+                )
+            )
+
+            # ==============================================
+            # CREATE SUBSECTION -> SECTION MAPPING
+            # ==============================================
+
+            subsection_section_map = {}
+
+            for item in blueprint_items:
+
+                if not item.subsection_id:
+                    continue
+
+                if not item.section_id:
+                    continue
+
+                # ------------------------------------------
+                # Store section for subsection
+                # ------------------------------------------
+
+                subsection_section_map[
+                    item.subsection_id
+                ] = {
+                    "section_id": item.section_id,
+
+                    "section_name": (
+                        item.section.name
+                        if item.section
+                        else None
+                    ),
+                }
+
+            # ==============================================
+            # RESPONSE DATA
+            # ==============================================
+
+            data = []
+
+            for rule in rules:
+
+                # ------------------------------------------
+                # GET SECTION FROM BLUEPRINT
+                # ------------------------------------------
+
+                section_data = (
+                    subsection_section_map.get(
+                        rule.subsection_id,
+                        {}
+                    )
+                )
+
+                section_id = section_data.get(
+                    "section_id"
+                )
+
+                section_name = section_data.get(
+                    "section_name"
+                )
+
+                # ------------------------------------------
+                # APPEND RESPONSE
+                # ------------------------------------------
+
+                data.append({
+
+                    "id": rule.id,
+
+                    "public_id": str(
+                        rule.public_id
+                    ),
+
+                    "assessment_version_id": (
+                        rule.assessment_version_id
+                    ),
+
+                    # ======================================
+                    # SECTION DETAILS
+                    # ======================================
+
+                    "section_id": section_id,
+
+                    "section_name": section_name,
+
+                    # ======================================
+                    # SUBSECTION DETAILS
+                    # ======================================
+
+                    "subsection_id": (
+                        rule.subsection_id
+                    ),
+
+                    "subsection": (
+                        rule.subsection.name
+                        if rule.subsection
+                        else None
+                    ),
+
+                    # ======================================
+                    # INTERPRETATION RULE DETAILS
+                    # ======================================
+
+                    "min_score": rule.min_score,
+
+                    "max_score": rule.max_score,
+
+                    "rating": rule.rating,
+
+                    "title": rule.title,
+
+                    "performance_analysis": (
+                        rule.performance_analysis
+                    ),
+
+                    "action_plan": (
+                        rule.action_plan
+                    ),
+
+                    "action_plan_option1": (
+                        rule.action_plan_option1
+                    ),
+
+                    "action_plan_option2": (
+                        rule.action_plan_option2
+                    ),
+
+                    "action_plan_option3": (
+                        rule.action_plan_option3
+                    ),
+
+                    "action_plan_option4": (
+                        rule.action_plan_option4
+                    ),
+
+                    "action_plan_option5": (
+                        rule.action_plan_option5
+                    ),
+
+                    "display_color": (
+                        rule.display_color
+                    ),
+
+                    "status": rule.status,
+
+                    "created_at": rule.created_at,
+
+                    "updated_at": rule.updated_at,
+                })
+
+            # ==============================================
+            # RESPONSE
+            # ==============================================
+
+            return Response(
+                {
+                    "success": True,
+
+                    "message": (
+                        "Interpretation rules fetched "
+                        "successfully."
+                    ),
+
+                    "assessment_version_id": (
+                        assessment_version.id
+                    ),
+
+                    "assessment_version": str(
+                        assessment_version
+                    ),
+
+                    "total_records": len(data),
+
+                    "data": data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+
+            return Response(
+                {
+                    "success": False,
+                    "message": str(e),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+            
+            
+class ActiveAssessmentWithVersionsListAPIView(APIView):
+
+    """
+    GET
+    /api/v1/asse/active-assessments-with-versions/
+
+    Returns:
+
+    Active Assessment
+        |
+        +-- Published Version
+              |
+              +-- Sections
+                    |
+                    +-- Subsections
+                          |
+                          +-- Question Count
+
+    IMPORTANT:
+    If a version has a PUBLISHED InterpretationRule,
+    that version will NOT be included in the response.
+    """
+
+    def get(self, request):
+
+        try:
+
+            # ==================================================
+            # PUBLISHED INTERPRETATION RULE SUBQUERY
+            # ==================================================
+
+            published_interpretation_rule = (
+                InterpretationRule.objects
+                .filter(
+                    assessment_version_id=OuterRef("pk"),
+                    status=InterpretationRule.Status.ACTIVE,
+                )
+            )
+
+            # ==================================================
+            # GET ACTIVE ASSESSMENTS
+            # ==================================================
+
+            assessments = (
+                Assessment.objects
+                .filter(
+                    status=Assessment.Status.ACTIVE
+                )
+                .prefetch_related(
+                    Prefetch(
+                        "versions",
+                        queryset=(
+                            AssessmentVersion.objects
+                            .filter(
+                                status=(
+                                    AssessmentVersion.Status.PUBLISHED
+                                )
+                            )
+                            .annotate(
+                                has_published_interpretation=Exists(
+                                    published_interpretation_rule
+                                )
+                            )
+                            .filter(
+                                has_published_interpretation=False
+                            )
+                            .order_by(
+                                "version_number",
+                                "id"
+                            )
+                        )
+                    )
+                )
+                .order_by("id")
+            )
+
+            data = []
+
+            # ==================================================
+            # LOOP ASSESSMENTS
+            # ==================================================
+
+            for assessment in assessments:
+
+                versions = []
+
+                # ==================================================
+                # LOOP PUBLISHED VERSIONS
+                # ==================================================
+
+                for version in assessment.versions.all():
+
+                    # ==================================================
+                    # GET BLUEPRINT ITEMS
+                    # ==================================================
+
+                    blueprint_items = list(
+                        AssessmentBlueprintItem.objects
+                        .filter(
+                            assessment_version_id=version.id,
+                            section__isnull=False,
+                        )
+                        .select_related(
+                            "section",
+                            "subsection",
+                            "question",
+                        )
+                        .order_by(
+                            "section_id",
+                            "subsection_id",
+                            "sequence_no",
+                            "id",
+                        )
+                    )
+
+                    # ==================================================
+                    # SECTION DICTIONARY
+                    # ==================================================
+
+                    sections_dict = {}
+
+                    # ==================================================
+                    # BUILD SECTION -> SUBSECTION HIERARCHY
+                    # ==================================================
+
+                    for item in blueprint_items:
+
+                        if not item.section:
+                            continue
+
+                        section_id = item.section_id
+
+                        # --------------------------------------------------
+                        # CREATE SECTION ONLY ONCE
+                        # --------------------------------------------------
+
+                        if section_id not in sections_dict:
+
+                            sections_dict[section_id] = {
+
+                                "section_id": section_id,
+
+                                "section_name": (
+                                    item.section.name
+                                ),
+
+                                "question_ids": set(),
+
+                                "subsections": {}
+                            }
+
+                        section_data = (
+                            sections_dict[section_id]
+                        )
+
+                        # --------------------------------------------------
+                        # ADD QUESTION TO SECTION
+                        # --------------------------------------------------
+
+                        if item.question_id:
+
+                            section_data[
+                                "question_ids"
+                            ].add(
+                                item.question_id
+                            )
+
+                        # --------------------------------------------------
+                        # SUBSECTION
+                        # --------------------------------------------------
+
+                        if item.subsection_id:
+
+                            subsection_id = (
+                                item.subsection_id
+                            )
+
+                            # ----------------------------------------------
+                            # CREATE SUBSECTION ONLY ONCE
+                            # ----------------------------------------------
+
+                            if (
+                                subsection_id
+                                not in section_data[
+                                    "subsections"
+                                ]
+                            ):
+
+                                section_data[
+                                    "subsections"
+                                ][subsection_id] = {
+
+                                    "subsection_id": (
+                                        subsection_id
+                                    ),
+
+                                    "subsection_name": (
+                                        item.subsection.name
+                                        if item.subsection
+                                        else None
+                                    ),
+
+                                    "question_ids": set(),
+                                }
+
+                            subsection_data = (
+                                section_data[
+                                    "subsections"
+                                ][subsection_id]
+                            )
+
+                            # ----------------------------------------------
+                            # ADD QUESTION TO SUBSECTION
+                            # ----------------------------------------------
+
+                            if item.question_id:
+
+                                subsection_data[
+                                    "question_ids"
+                                ].add(
+                                    item.question_id
+                                )
+
+                    # ==================================================
+                    # CONVERT DICTIONARY TO RESPONSE FORMAT
+                    # ==================================================
+
+                    section_data_list = []
+
+                    for section_id, section in (
+                        sections_dict.items()
+                    ):
+
+                        subsection_data_list = []
+
+                        # --------------------------------------------------
+                        # SUBSECTIONS
+                        # --------------------------------------------------
+
+                        for (
+                            subsection_id,
+                            subsection
+                        ) in section[
+                            "subsections"
+                        ].items():
+
+                            subsection_data_list.append({
+
+                                "subsection_id": (
+                                    subsection[
+                                        "subsection_id"
+                                    ]
+                                ),
+
+                                "subsection_name": (
+                                    subsection[
+                                        "subsection_name"
+                                    ]
+                                ),
+
+                                "question_count": (
+                                    len(
+                                        subsection[
+                                            "question_ids"
+                                        ]
+                                    )
+                                ),
+                            })
+
+                        # --------------------------------------------------
+                        # SECTION
+                        # --------------------------------------------------
+
+                        section_data_list.append({
+
+                            "section_id": (
+                                section[
+                                    "section_id"
+                                ]
+                            ),
+
+                            "section_name": (
+                                section[
+                                    "section_name"
+                                ]
+                            ),
+
+                            "question_count": (
+                                len(
+                                    section[
+                                        "question_ids"
+                                    ]
+                                )
+                            ),
+
+                            "subsection_count": (
+                                len(
+                                    subsection_data_list
+                                )
+                            ),
+
+                            "subsections": (
+                                subsection_data_list
+                            ),
+                        })
+
+                    # ==================================================
+                    # VERSION DATA
+                    # ==================================================
+
+                    versions.append({
+
+                        "id": version.id,
+
+                        "public_id": str(
+                            version.public_id
+                        ),
+
+                        "version_number": (
+                            version.version_number
+                        ),
+
+                        "version_name": (
+                            version.version_name
+                        ),
+
+                        "status": (
+                            version.status
+                        ),
+
+                        "created_at": (
+                            version.created_at
+                        ),
+
+                        "updated_at": (
+                            version.updated_at
+                        ),
+
+                        "section_count": (
+                            len(section_data_list)
+                        ),
+
+                        "sections": (
+                            section_data_list
+                        ),
+                    })
+
+                # ==================================================
+                # ONLY RETURN ASSESSMENT IF IT HAS
+                # AT LEAST ONE VALID VERSION
+                # ==================================================
+
+                if versions:
+
+                    data.append({
+
+                        "id": assessment.id,
+
+                        "public_id": str(
+                            assessment.public_id
+                        ),
+
+                        "assessment_name": (
+                            assessment.name
+                        ),
+
+                        "short_name": (
+                            assessment.short_name
+                        ),
+
+                        "assessment_type": (
+                            assessment.assessment_type
+                        ),
+
+                        "description": (
+                            assessment.description
+                        ),
+
+                        "default_language": (
+                            assessment.default_language
+                        ),
+
+                        "status": (
+                            assessment.status
+                        ),
+
+                        "versions": (
+                            versions
+                        ),
+                    })
+
+            # ==================================================
+            # SUCCESS RESPONSE
+            # ==================================================
+
+            return Response(
+                {
+                    "success": True,
+
+                    "message": (
+                        "Active assessments and "
+                        "published versions fetched successfully."
+                    ),
+
+                    "total_assessments": len(data),
+
+                    "data": data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+
+            return Response(
+                {
+                    "success": False,
+                    "message": str(e),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )        
+
+class InterpretationRulesWithAssessmentAPIView(APIView):
+    """
+    GET
+    /api/v1/asse/interpretation-rules/with-assessments/
+
+    Fetch only those Assessments, Versions and SubSections
+    which have InterpretationRule records.
+
+    Structure:
+
+    Assessment
+        -> Versions
+            -> section_count
+            -> SubSections
+                -> Interpretation Rules
+    """
+
+    def get(self, request):
+
+        try:
+
+            # ==================================================
+            # GET ONLY VERSIONS WHICH HAVE INTERPRETATION RULES
+            # ==================================================
+
+            rules = (
+                InterpretationRule.objects
+                .select_related(
+                    "assessment_version",
+                    "assessment_version__assessment",
+                    "subsection",
+                )
+                .order_by(
+                    "assessment_version__assessment_id",
+                    "assessment_version_id",
+                    "subsection_id",
+                    "min_score",
+                    "id",
+                )
+            )
+
+            # ==================================================
+            # GROUP DATA
+            # ==================================================
+
+            assessments_dict = {}
+
+            for rule in rules:
+
+                assessment_version = rule.assessment_version
+                assessment = assessment_version.assessment
+                subsection = rule.subsection
+
+                assessment_id = assessment.id
+                version_id = assessment_version.id
+                subsection_id = subsection.id
+
+                # ==================================================
+                # ASSESSMENT
+                # ==================================================
+
+                if assessment_id not in assessments_dict:
+
+                    assessments_dict[assessment_id] = {
+                        "id": assessment.id,
+
+                        "public_id": str(
+                            assessment.public_id
+                        ),
+
+                        "assessment_name": assessment.name,
+
+                        "short_name": assessment.short_name,
+
+                        "assessment_type": (
+                            assessment.assessment_type
+                        ),
+
+                        "description": (
+                            assessment.description
+                        ),
+
+                        "default_language": (
+                            assessment.default_language
+                        ),
+
+                        "status": assessment.status,
+
+                        "versions": {},
+                    }
+
+                # ==================================================
+                # VERSION
+                # ==================================================
+
+                if version_id not in assessments_dict[
+                    assessment_id
+                ]["versions"]:
+
+                    # ------------------------------------------
+                    # SECTION COUNT FROM BLUEPRINT TABLE
+                    # ------------------------------------------
+
+                    section_count = (
+                        AssessmentBlueprintItem.objects
+                        .filter(
+                            assessment_version_id=version_id,
+                            section__isnull=False,
+                        )
+                        .values(
+                            "section_id"
+                        )
+                        .distinct()
+                        .count()
+                    )
+
+                    assessments_dict[
+                        assessment_id
+                    ]["versions"][version_id] = {
+
+                        "id": assessment_version.id,
+
+                        "public_id": str(
+                            assessment_version.public_id
+                        ),
+
+                        "version_number": (
+                            assessment_version.version_number
+                        ),
+
+                        "version_name": (
+                            assessment_version.version_name
+                        ),
+
+                        "status": (
+                            assessment_version.status
+                        ),
+
+                        "created_at": (
+                            assessment_version.created_at
+                        ),
+
+                        "updated_at": (
+                            assessment_version.updated_at
+                        ),
+
+                        # ------------------------------------------
+                        # SECTION COUNT
+                        # ------------------------------------------
+
+                        "section_count": section_count,
+
+                        # ------------------------------------------
+                        # EXISTING STRUCTURE
+                        # ------------------------------------------
+
+                        "subsections": {},
+                    }
+
+                # ==================================================
+                # SUBSECTION
+                # ==================================================
+
+                version_data = assessments_dict[
+                    assessment_id
+                ]["versions"][version_id]
+
+                if subsection_id not in version_data[
+                    "subsections"
+                ]:
+
+                    version_data[
+                        "subsections"
+                    ][subsection_id] = {
+
+                        "subsection_id": (
+                            subsection.id
+                        ),
+
+                        "subsection_name": (
+                            subsection.name
+                        ),
+
+                        "rules": [],
+                    }
+
+                # ==================================================
+                # INTERPRETATION RULE
+                # ==================================================
+
+                version_data[
+                    "subsections"
+                ][subsection_id]["rules"].append({
+
+                    "id": rule.id,
+
+                    "public_id": str(
+                        rule.public_id
+                    ),
+
+                    "min_score": rule.min_score,
+
+                    "max_score": rule.max_score,
+
+                    "rating": rule.rating,
+
+                    "title": rule.title,
+
+                    "performance_analysis": (
+                        rule.performance_analysis
+                    ),
+
+                    "action_plan": (
+                        rule.action_plan
+                    ),
+
+                    "action_plan_option1": (
+                        rule.action_plan_option1
+                    ),
+
+                    "action_plan_option2": (
+                        rule.action_plan_option2
+                    ),
+
+                    "action_plan_option3": (
+                        rule.action_plan_option3
+                    ),
+
+                    "action_plan_option4": (
+                        rule.action_plan_option4
+                    ),
+
+                    "action_plan_option5": (
+                        rule.action_plan_option5
+                    ),
+
+                    "display_color": (
+                        rule.display_color
+                    ),
+
+                    "status": rule.status,
+
+                    "created_at": (
+                        rule.created_at
+                    ),
+
+                    "updated_at": (
+                        rule.updated_at
+                    ),
+                })
+
+            # ==================================================
+            # CONVERT DICTIONARIES TO LISTS
+            # ==================================================
+
+            data = []
+
+            for assessment_data in assessments_dict.values():
+
+                versions = []
+
+                for version_data in (
+                    assessment_data["versions"].values()
+                ):
+
+                    subsections = []
+
+                    for subsection_data in (
+                        version_data[
+                            "subsections"
+                        ].values()
+                    ):
+
+                        # ------------------------------------------
+                        # RULE COUNT
+                        # ------------------------------------------
+
+                        subsection_data[
+                            "rule_count"
+                        ] = len(
+                            subsection_data["rules"]
+                        )
+
+                        subsections.append(
+                            subsection_data
+                        )
+
+                    # ------------------------------------------
+                    # SUBSECTION COUNT
+                    # ------------------------------------------
+
+                    version_data[
+                        "subsection_count"
+                    ] = len(
+                        subsections
+                    )
+
+                    version_data[
+                        "subsections"
+                    ] = subsections
+
+                    versions.append(
+                        version_data
+                    )
+
+                # ------------------------------------------
+                # VERSION LIST
+                # ------------------------------------------
+
+                assessment_data[
+                    "versions"
+                ] = versions
+
+                data.append(
+                    assessment_data
+                )
+
+            # ==================================================
+            # RESPONSE
+            # ==================================================
+
+            return Response(
+                {
+                    "success": True,
+
+                    "message": (
+                        "Interpretation rules fetched "
+                        "successfully."
+                    ),
+
+                    "total_assessments": len(data),
+
+                    "data": data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+
+            return Response(
+                {
+                    "success": False,
+
+                    "message": str(e),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+          
+            
+            
+            
+            
+            
+            
+                          
         

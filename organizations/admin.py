@@ -1,6 +1,118 @@
 from django.contrib import admin
 
-from organizations.models import Campaign, Organization, RegistrationChannel, RegistrationLink
+from organizations.models import Campaign, Organization, OrganizationMember, OrganizationPackage, Package, RegistrationChannel, RegistrationLink
+
+@admin.register(Package)
+class PackageAdmin(admin.ModelAdmin):
+
+    # ==================================================
+    # LIST DISPLAY
+    # ==================================================
+
+    list_display = (
+        "id",
+        "public_id",
+        "package_name",
+        "assessment_version",
+        "grade",
+        "package_price",
+        "status",
+        "created_at",
+        "updated_at",
+    )
+
+    # ==================================================
+    # SEARCH
+    # ==================================================
+
+    search_fields = (
+        "package_name",
+        "public_id",
+        "assessment_version__version_number",
+        "assessment_version__version_name",
+    )
+
+    # ==================================================
+    # FILTERS
+    # ==================================================
+
+    list_filter = (
+        "status",
+        "assessment_version",
+    )
+
+    # ==================================================
+    # DEFAULT ORDERING
+    # ==================================================
+
+    ordering = (
+        "id",
+    )
+
+    # ==================================================
+    # READ ONLY FIELDS
+    # ==================================================
+
+    readonly_fields = (
+        "id",
+        "public_id",
+    )
+
+    # ==================================================
+    # FORM LAYOUT
+    # ==================================================
+
+    fieldsets = (
+
+        (
+            "Package Information",
+            {
+                "fields": (
+                    "id",
+                    "public_id",
+                    "assessment_version",
+                    "package_name",
+                    "package_price",
+                    "status",
+                    "package_description",
+                )
+            },
+        ),
+
+        (
+            "Package Features",
+            {
+                "fields": (
+                    "package_features1",
+                    "package_features2",
+                    "package_features3",
+                    "package_features4",
+                    "package_features5",
+                )
+            },
+        ),
+
+        (
+            "Package Deliverables",
+            {
+                "fields": (
+                    "package_deliverable1",
+                    "package_deliverable2",
+                    "package_deliverable3",
+                    "package_deliverable4",
+                    "package_deliverable5",
+                )
+            },
+        ),
+    )
+
+    # ==================================================
+    # FOREIGN KEY DISPLAY
+    # ==================================================
+
+    autocomplete_fields = (
+        "assessment_version",
+    )
 
 # ==========================================================
 # Organization Admin
@@ -45,7 +157,7 @@ class OrganizationAdmin(admin.ModelAdmin):
     )
 
     ordering = (
-        "name",
+        "-created_at",
     )
 
     fieldsets = (
@@ -103,6 +215,108 @@ class OrganizationAdmin(admin.ModelAdmin):
             },
         ),
     )
+    
+    
+@admin.register(OrganizationMember)
+class OrganizationMemberAdmin(admin.ModelAdmin):
+
+    list_display = (
+        "id",
+        "public_id",
+        "organization",
+        "user",
+        "member_type",
+        "status",
+        "joined_at",
+        "invited_by",
+        "created_at",
+    )
+
+    list_filter = (
+        "member_type",
+        "status",
+        "organization",
+    )
+
+    search_fields = (
+        "organization__name",
+        "organization__organization_code",
+        "user__email",
+        "user__first_name",
+        "user__last_name",
+    )
+
+    readonly_fields = (
+        "public_id",
+        "created_at",
+        "updated_at",
+    )
+
+    autocomplete_fields = (
+        "organization",
+        "user",
+        "invited_by",
+    )
+
+    ordering = (
+        "-created_at",
+    )
+
+@admin.register(OrganizationPackage)
+class OrganizationPackageAdmin(admin.ModelAdmin):
+
+    list_display = (
+        "id",
+        "public_id",
+        "organization",
+        "package",
+        "negotiated_price",
+        "currency",
+        "seat_limit",
+        "used_seats",
+        "valid_from",
+        "valid_until",
+        "status",
+        "assigned_by",
+        "created_at",
+    )
+
+    list_filter = (
+        "status",
+        "currency",
+        "organization",
+        "package",
+        "valid_from",
+        "valid_until",
+    )
+
+    search_fields = (
+        "organization__name",
+        "organization__organization_code",
+        "package__package_name",
+        "contract_code",
+        "notes",
+        "assigned_by__email",
+    )
+
+    readonly_fields = (
+        "public_id",
+        "used_seats",
+        "created_at",
+        "updated_at",
+    )
+
+    autocomplete_fields = (
+        "organization",
+        "package",
+        "assigned_by",
+    )
+
+    ordering = (
+        "-created_at",
+    )
+
+    list_per_page = 25
 
 
 # ==========================================================
@@ -287,106 +501,47 @@ class RegistrationChannelAdmin(admin.ModelAdmin):
 
 @admin.register(RegistrationLink)
 class RegistrationLinkAdmin(admin.ModelAdmin):
+
     list_display = (
         "id",
-        "link_code",
-        "display_name",
-        "campaign",
-        "registration_channel",
-        "registration_source",
-        "registrations_count",
-        "max_registrations",
-        "is_active",
+        "public_id",
+        "organization",
+        "public_slug",
+        "link_name",
+        "status",
         "expires_at",
+        "max_registrations",
+        "registration_count",
+        "created_by",
+        "created_at",
     )
 
     list_filter = (
-        "registration_channel",
-        "registration_source",
-        "is_active",
-        "campaign",
+        "status",
+        "organization",
+        "created_at",
     )
 
     search_fields = (
-        "link_code",
-        "display_name",
-        "campaign__name",
-    )
-
-    autocomplete_fields = (
-        "campaign",
-        "assessment_version",
-        "created_by",
+        "public_slug",
+        "link_name",
+        "organization__name",
+        "organization__organization_code",
     )
 
     readonly_fields = (
         "public_id",
-        "registrations_count",
+        "token_hash",
+        "registration_count",
         "created_at",
         "updated_at",
     )
 
-    ordering = (
-        "-created_at",
+    autocomplete_fields = (
+        "organization",
+        "created_by",
     )
 
-    fieldsets = (
-        (
-            "Registration Link",
-            {
-                "fields": (
-                    "public_id",
-                    "campaign",
-                    "link_code",
-                    "display_name",
-                )
-            },
-        ),
-        (
-            "Registration Settings",
-            {
-                "fields": (
-                    "registration_channel",
-                    "registration_source",
-                    "assessment_version",
-                )
-            },
-        ),
-        (
-            "Limits",
-            {
-                "fields": (
-                    "max_registrations",
-                    "registrations_count",
-                    "expires_at",
-                )
-            },
-        ),
-        (
-            "Permissions",
-            {
-                "fields": (
-                    "allow_duplicate_email",
-                    "allow_duplicate_mobile",
-                    "is_active",
-                )
-            },
-        ),
-        (
-            "Created By",
-            {
-                "fields": (
-                    "created_by",
-                )
-            },
-        ),
-        (
-            "Audit",
-            {
-                "fields": (
-                    "created_at",
-                    "updated_at",
-                )
-            },
-        ),
+    ordering = (
+        "-created_at",
     )

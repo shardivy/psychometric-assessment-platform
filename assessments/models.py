@@ -225,6 +225,12 @@ class AssessmentVersion(models.Model):
         null=True,
         blank=True
     )
+    
+    section_wise_randomize_question = models.BooleanField(
+        default=False,
+        null=True,
+        blank=True
+    )
 
     show_result_immediately = models.BooleanField(
         default=False,
@@ -823,7 +829,7 @@ class Question(models.Model):
     )
 
     media_url = models.URLField(
-        max_length=500,
+        max_length=2000,
         null=True,
         blank=True,
     )
@@ -1177,6 +1183,14 @@ class AssessmentBlueprintItem(models.Model):
             models.Index(fields=["question"]),
             models.Index(fields=["sequence_no"]),
             models.Index(fields=["status"]),
+            models.Index(
+                fields=[
+                    "assessment_version",
+                    "grade",
+                    "status",
+                ],
+                name="bp_version_grade_status_idx",
+            ),
         ]
 
     def __str__(self):
@@ -1288,12 +1302,18 @@ class InterpretationRule(models.Model):
     Converts calculated scores into
     human-readable interpretations.
     """
+    
+    class Status(models.TextChoices):
+            DRAFT = "DRAFT", "Draft"
+            ACTIVE = "ACTIVE", "Active"
+            INACTIVE = "INACTIVE", "Inactive"
 
     # Primary Key
     id = models.BigAutoField(primary_key=True)
 
     # Public UUID
     public_id = models.UUIDField(
+        default=uuid.uuid4,
         editable=False,
         unique=True,
         db_index=True
@@ -1328,17 +1348,31 @@ class InterpretationRule(models.Model):
 
     title = models.CharField(
         max_length=100,
-        help_text="Example: Outstanding, Strong, Moderate"
+        help_text="Example: Outstanding, Strong, Moderate",
+        null=True,
+        blank=True
     )
 
     performance_analysis = models.TextField(null=True, blank=True)
     
     action_plan = models.TextField(null=True, blank=True)
+    
+    action_plan_option1 = models.TextField(null=True, blank=True)
+    action_plan_option2 = models.TextField(null=True, blank=True)
+    action_plan_option3 = models.TextField(null=True, blank=True)
+    action_plan_option4 = models.TextField(null=True, blank=True)
+    action_plan_option5 = models.TextField(null=True, blank=True)
 
     display_color = models.CharField(
         max_length=50,
         blank=True,
         null=True
+    )
+    
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.DRAFT
     )
 
     created_at = models.DateTimeField(

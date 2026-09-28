@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from students.models import Student, StudentRegistration
+from students.models import Order, Student, StudentRegistration
 
 # ==========================================================
 # Student Registration Inline
@@ -8,15 +8,16 @@ from students.models import Student, StudentRegistration
 
 class StudentRegistrationInline(admin.TabularInline):
     model = StudentRegistration
+    fk_name = "student"
     extra = 0
 
     fields = (
         "organization",
-        "campaign",
         "registration_number",
         "grade",
         "class_name",
         "section",
+        "registration_type",
         "registration_status",
         "registered_at",
     )
@@ -148,9 +149,9 @@ class StudentRegistrationAdmin(admin.ModelAdmin):
         "registration_number",
         "student",
         "organization",
-        "campaign",
         "grade",
         "class_name",
+        "registration_type",
         "registration_status",
         "registered_at",
     )
@@ -158,7 +159,6 @@ class StudentRegistrationAdmin(admin.ModelAdmin):
     list_filter = (
         "registration_status",
         "organization",
-        "campaign",
         "academic_year",
         "grade",
     )
@@ -169,7 +169,6 @@ class StudentRegistrationAdmin(admin.ModelAdmin):
         "student__first_name",
         "student__last_name",
         "organization__name",
-        "campaign__name",
         "roll_number",
         "admission_number",
     )
@@ -177,8 +176,6 @@ class StudentRegistrationAdmin(admin.ModelAdmin):
     autocomplete_fields = (
         "student",
         "organization",
-        "campaign",
-        "registration_channel",
         "registration_link",
         "assigned_counsellor",
     )
@@ -202,7 +199,6 @@ class StudentRegistrationAdmin(admin.ModelAdmin):
                     "public_id",
                     "student",
                     "organization",
-                    "campaign",
                 )
             },
         ),
@@ -210,7 +206,6 @@ class StudentRegistrationAdmin(admin.ModelAdmin):
             "Registration Details",
             {
                 "fields": (
-                    "registration_channel",
                     "registration_link",
                     "registration_number",
                     "registration_status",
@@ -250,3 +245,85 @@ class StudentRegistrationAdmin(admin.ModelAdmin):
             },
         ),
     )
+    
+@admin.register(Order)
+class OrderAdmin(admin.ModelAdmin):
+
+    # ==========================================
+    # LIST DISPLAY
+    # ==========================================
+
+    list_display = (
+        "id",
+        "order_number",
+        "student",
+        "package",
+        "quantity",
+        "unit_price",
+        "total_amount",
+        "status",
+        "created_at",
+        "updated_at",
+    )
+
+    # ==========================================
+    # FILTERS
+    # ==========================================
+
+    list_filter = (
+        "status",
+        "package",
+        "created_at",
+    )
+
+    # ==========================================
+    # SEARCH
+    # ==========================================
+
+    search_fields = (
+        "order_number",
+        "student__student_code",
+        "student__first_name",
+        "student__last_name",
+        "student__user__email",
+        "package__package_name",
+    )
+
+    # ==========================================
+    # READ ONLY FIELDS
+    # ==========================================
+
+    readonly_fields = (
+        "public_id",
+        "created_at",
+        "updated_at",
+    )
+
+    # ==========================================
+    # AUTOCOMPLETE
+    # ==========================================
+
+    autocomplete_fields = (
+        "student",
+        "package",
+    )
+
+    # ==========================================
+    # ORDERING
+    # ==========================================
+
+    ordering = (
+        "-created_at",
+    )
+
+    # ==========================================
+    # DATE HIERARCHY
+    # ==========================================
+
+    date_hierarchy = "created_at"
+
+    # ==========================================
+    # ITEMS PER PAGE
+    # ==========================================
+
+    list_per_page = 25

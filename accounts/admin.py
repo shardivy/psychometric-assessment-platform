@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
-from accounts.models import OrganizationMember, Permission, Role, RolePermission, User, UserRole
+from accounts.models import EmailVerificationOTP, Permission, Role, RolePermission, User, UserRole
 
 # ==========================================================
 # User Admin
@@ -118,6 +118,34 @@ class UserAdmin(BaseUserAdmin):
         ),
     )
 
+
+@admin.register(EmailVerificationOTP)
+class EmailVerificationOTPAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "user",
+        "otp",
+        "expires_at",
+        "is_verified",
+        "attempts",
+        "created_at",
+    )
+
+    list_filter = (
+        "is_verified",
+        "expires_at",
+    )
+
+    search_fields = (
+        "user__email",
+        "otp",
+    )
+
+    readonly_fields = (
+        "public_id",
+        "created_at",
+        "updated_at",
+    )
 
 # ==========================================================
 # Role Admin
@@ -265,49 +293,5 @@ class UserRoleAdmin(admin.ModelAdmin):
     )
 
 
-# ==========================================================
-# Organization Member Admin
-# ==========================================================
 
-@admin.register(OrganizationMember)
-class OrganizationMemberAdmin(admin.ModelAdmin):
-    list_display = (
-        "id",
-        "organization",
-        "user",
-        "employee_code",
-        "designation",
-        "status",
-        "is_primary",
-    )
-
-    list_filter = (
-        "organization",
-        "status",
-        "is_primary",
-    )
-
-    search_fields = (
-        "organization__name",
-        "user__email",
-        "user__first_name",
-        "user__last_name",
-        "employee_code",
-        "designation",
-    )
-
-    autocomplete_fields = (
-        "organization",
-        "user",
-        "reporting_to",
-    )
-
-    readonly_fields = (
-        "created_at",
-        "updated_at",
-    )
-
-    ordering = (
-        "organization",
-        "user",
-    )
+   

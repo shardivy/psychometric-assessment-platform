@@ -116,6 +116,7 @@ class AssessmentVersionAdmin(admin.ModelAdmin):
         "allow_resume",
         "allow_review",
         "randomize_sections",
+        "section_wise_randomize_question",
         "show_result_immediately",
     )
 
@@ -469,6 +470,7 @@ class SubSectionAdmin(admin.ModelAdmin):
         "subsection_code",
         "name",
         "display_order",
+        "randomize_questions",
         "time_limit_minutes",
         "question_limit",
         "status",
@@ -944,12 +946,14 @@ class InterpretationRuleAdmin(admin.ModelAdmin):
         "title",
         "min_score",
         "max_score",
+        "status",
         "display_color",
     )
 
     list_filter = (
         "assessment_version",
         "subsection",
+        "status",
     )
 
     search_fields = (
@@ -971,8 +975,9 @@ class InterpretationRuleAdmin(admin.ModelAdmin):
     )
 
     ordering = (
-        "subsection",
-        "min_score",
+        # "subsection",
+        # "min_score",
+        "-created_at",
     )
 
     fieldsets = (
@@ -985,7 +990,6 @@ class InterpretationRuleAdmin(admin.ModelAdmin):
                     "subsection",
                     "rating",
                     "title",
-                    "interpretation",
                 )
             },
         ),

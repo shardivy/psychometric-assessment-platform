@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     "runtime",
     "evaluation",
     "reports",
+    "calculate",
     
     
 ]
@@ -169,3 +170,6 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "assessments.pagination.DefaultPagination",
     "PAGE_SIZE": 20,
 }
+
+FRONTEND_URL = "http://192.168.1.3:5173"
+# FRONTEND_URL = "http://192.168.85.186:5173"

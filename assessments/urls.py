@@ -1,6 +1,28 @@
 from django.urls import path
 
-from assessments.views import AssessmentAPIView, AssessmentBlueprintDraftDetailAPIView, AssessmentBlueprintItemUpdateAPIView, AssessmentBlueprintListAPIView, AssessmentBuilderAPIView, AssessmentVersionAPIView, AssessmentVersionBlueprintAPIView, AssessmentVersionGradesAPIView, GenerateAssessmentVersionAPIView, GenerateQuestionCodeAPIView, GradeAPIView, QuestionAPIView, QuestionLibraryAPIView, QuestionsByGradeTagAPIView, SectionAPIView, SubSectionAPIView, TagsAPIView
+from assessments.views import (
+    ActiveAssessmentWithVersionsListAPIView, 
+    AssessmentAPIView, 
+    AssessmentBlueprintDraftDetailAPIView, 
+    AssessmentBlueprintItemUpdateAPIView, 
+    AssessmentBlueprintListAPIView, 
+    AssessmentBuilderAPIView, 
+    AssessmentVersionAPIView, 
+    AssessmentVersionBlueprintAPIView, 
+    AssessmentVersionGradesAPIView, 
+    GenerateAssessmentVersionAPIView, 
+    GenerateQuestionCodeAPIView, 
+    GradeAPIView, 
+    InterpretationRuleBulkCreateAPIView, 
+    InterpretationRuleBulkUpdateAPIView, 
+    InterpretationRuleByVersionAPIView,
+    InterpretationRulesWithAssessmentAPIView, 
+    QuestionAPIView, 
+    QuestionLibraryAPIView, 
+    QuestionsByGradeTagAPIView, 
+    SectionAPIView, 
+    SubSectionAPIView, 
+    TagsAPIView)
 
 
 urlpatterns = [
@@ -148,6 +170,34 @@ urlpatterns = [
         "question-library/",
         QuestionLibraryAPIView.as_view(),
         name="question-library",
+    ),
+    
+    # ======================== Interpretation Rules =====================
+    
+    path(
+        "interpretation-rules/bulk-create/",
+        InterpretationRuleBulkCreateAPIView.as_view(),
+        name="interpretation-rule-bulk-create",
+    ),    
+    path(
+        "interpretation-rules/bulk-update/",
+        InterpretationRuleBulkUpdateAPIView.as_view(),
+        name="interpretation-rule-bulk-update",
+    ),
+    path(
+        "interpretation-rules/version/<int:version_id>/",
+        InterpretationRuleByVersionAPIView.as_view(),
+        name="interpretation-rules-by-version",
+    ),
+    path(
+        "assessments-with-versions/",
+        ActiveAssessmentWithVersionsListAPIView.as_view(),
+        name="assessments-with-versions",
+    ),
+    path(
+        "interpretation-rules-by-version/",
+        InterpretationRulesWithAssessmentAPIView.as_view(),
+        name="interpretation-rules-by-version",
     ),
 
 ]

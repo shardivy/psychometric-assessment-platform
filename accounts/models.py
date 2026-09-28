@@ -1,8 +1,10 @@
 import uuid
 
 from django.db import models
+from django.conf import settings
 from django.contrib.auth.base_user import BaseUserManager
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
+from django.utils import timezone
 
 class UserManager(BaseUserManager):
     use_in_migrations = True
@@ -175,6 +177,164 @@ class User(AbstractBaseUser, PermissionsMixin):
     def __str__(self):
         return f"{self.first_name} {self.last_name or ''}".strip()
     
+class EmailVerificationOTP(models.Model):
+
+    id = models.BigAutoField(
+        primary_key=True
+    )
+
+    public_id = models.UUIDField(
+        default=uuid.uuid4,
+        unique=True,
+        editable=False,
+        db_index=True
+    )
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="email_verification_otps"
+    )
+
+    otp = models.CharField(
+        max_length=6
+    )
+
+    expires_at = models.DateTimeField()
+
+    is_verified = models.BooleanField(
+        default=False
+    )
+
+    attempts = models.PositiveIntegerField(
+        default=0
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True
+    )
+
+    class Meta:
+        db_table = "email_verification_otps"
+        ordering = ["-created_at"]
+
+        indexes = [
+            models.Index(fields=["user"]),
+            models.Index(fields=["otp"]),
+            models.Index(fields=["expires_at"]),
+            models.Index(fields=["is_verified"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.otp}"
+
+    @property
+    def is_expired(self):
+        return timezone.now() >= self.expires_at
+
+class PasswordResetOTP(models.Model):
+
+    # ==================================================
+    # PRIMARY KEY
+    # ==================================================
+
+    id = models.BigAutoField(
+        primary_key=True
+    )
+
+    # ==================================================
+    # PUBLIC ID
+    # ==================================================
+
+    public_id = models.UUIDField(
+        default=uuid.uuid4,
+        editable=False,
+        unique=True,
+        db_index=True
+    )
+
+    # ==================================================
+    # USER
+    # ==================================================
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="password_reset_otps"
+    )
+
+    # ==================================================
+    # OTP
+    # ==================================================
+
+    otp = models.CharField(
+        max_length=6
+    )
+
+    # ==================================================
+    # EXPIRY
+    # ==================================================
+
+    expires_at = models.DateTimeField()
+
+    # ==================================================
+    # STATUS
+    # ==================================================
+
+    is_verified = models.BooleanField(
+        default=False
+    )
+
+    is_used = models.BooleanField(
+        default=False
+    )
+
+    # ==================================================
+    # CREATED / UPDATED
+    # ==================================================
+
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True
+    )
+
+    class Meta:
+
+        db_table = "password_reset_otps"
+
+        ordering = [
+            "-created_at"
+        ]
+
+        indexes = [
+            models.Index(
+                fields=["user"]
+            ),
+            models.Index(
+                fields=["otp"]
+            ),
+            models.Index(
+                fields=["expires_at"]
+            ),
+        ]
+
+    def is_expired(self):
+
+        return timezone.now() > self.expires_at
+
+    def __str__(self):
+
+        return (
+            f"{self.user.email} - "
+            f"{self.otp}"
+        )
     
 class Role(models.Model):
     """
@@ -452,102 +612,3 @@ class UserRole(models.Model):
     def __str__(self):
         return f"{self.user.email} - {self.role.name}"
     
-class OrganizationMember(models.Model):
-    """
-    Maps Users to Organizations.
-    Supports multi-tenant architecture.
-    """
-
-    class Status(models.TextChoices):
-        ACTIVE = "ACTIVE", "Active"
-        INACTIVE = "INACTIVE", "Inactive"
-        SUSPENDED = "SUSPENDED", "Suspended"
-
-    # ---------------------------------
-    # Primary Key
-    # ---------------------------------
-    id = models.BigAutoField(primary_key=True)
-
-    organization = models.ForeignKey(
-        "organizations.Organization",
-        on_delete=models.CASCADE,
-        related_name="members"
-    )
-
-    user = models.ForeignKey(
-        "accounts.User",
-        on_delete=models.CASCADE,
-        related_name="organization_memberships"
-    )
-
-    employee_code = models.CharField(
-        max_length=30,
-        blank=True,
-        null=True
-    )
-
-    designation = models.CharField(
-        max_length=100,
-        blank=True,
-        null=True
-    )
-
-    joining_date = models.DateField(
-        blank=True,
-        null=True
-    )
-
-    reporting_to = models.ForeignKey(
-        User,
-        on_delete=models.SET_NULL,
-        related_name="team_members",
-        blank=True,
-        null=True
-    )
-
-    is_primary = models.BooleanField(
-        default=False
-    )
-
-    status = models.CharField(
-        max_length=20,
-        choices=Status.choices,
-        default=Status.ACTIVE
-    )
-
-    created_at = models.DateTimeField(
-        auto_now_add=True
-    )
-
-    updated_at = models.DateTimeField(
-        auto_now=True
-    )
-
-    class Meta:
-        db_table = "organization_members"
-
-        verbose_name = "Organization Member"
-        verbose_name_plural = "Organization Members"
-
-        ordering = [
-            "organization",
-            "user"
-        ]
-
-        constraints = [
-            models.UniqueConstraint(
-                fields=["organization", "user"],
-                name="unique_organization_user"
-            )
-        ]
-
-        indexes = [
-            models.Index(fields=["organization"]),
-            models.Index(fields=["user"]),
-            models.Index(fields=["status"]),
-            models.Index(fields=["employee_code"]),
-            models.Index(fields=["is_primary"]),
-        ]
-
-    def __str__(self):
-        return f"{self.user.email} - {self.organization.name}"

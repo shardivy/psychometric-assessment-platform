@@ -1,6 +1,7 @@
 import uuid
 
 from django.db import models
+from django.core.validators import MinValueValidator
 
 from organizations.models import Campaign, Organization, RegistrationChannel, RegistrationLink
 
@@ -141,8 +142,10 @@ class StudentRegistration(models.Model):
         REGISTERED = "REGISTERED", "Registered"
         ASSESSMENT_ASSIGNED = "ASSESSMENT_ASSIGNED", "Assessment Assigned"
         STARTED = "STARTED", "Started"
+        IN_PROGRESS = "IN_PROGRESS", "In Progress"
         COMPLETED = "COMPLETED", "Completed"
         REPORT_GENERATED = "REPORT_GENERATED", "Report Generated"
+        REPORT_SHARED = "REPORT_SHARED", "Report Shared"
         COUNSELLING_PENDING = "COUNSELLING_PENDING", "Counselling Pending"
         COUNSELLING_COMPLETED = "COUNSELLING_COMPLETED", "Counselling Completed"
 
@@ -166,27 +169,17 @@ class StudentRegistration(models.Model):
     organization = models.ForeignKey(
         Organization,
         on_delete=models.CASCADE,
-        related_name="student_registrations"
-    )
-
-    campaign = models.ForeignKey(
-        Campaign,
-        on_delete=models.CASCADE,
-        related_name="student_registrations"
-    )
-    
-    registration_channel = models.ForeignKey(
-        RegistrationChannel,    
-        on_delete=models.SET_NULL,
+        related_name="student_registrations",
         null=True,
-        blank=True,
-        related_name="student_registrations_channel"
+        blank=True
     )
 
     registration_link = models.ForeignKey(
         RegistrationLink,
         on_delete=models.CASCADE,
-        related_name="student_registrations"
+        related_name="student_registrations",
+        null=True,
+        blank=True
     )
 
     registration_number = models.CharField(
@@ -206,10 +199,12 @@ class StudentRegistration(models.Model):
         null=True
     )
     
-    grade = models.CharField(
-        max_length=20,
+    grade = models.ForeignKey(
+        "assessments.Grade",
+        on_delete=models.SET_NULL,
+        null=True,
         blank=True,
-        null=True
+        related_name="student_registrations"
     )
 
     class_name = models.CharField(
@@ -231,11 +226,17 @@ class StudentRegistration(models.Model):
     )
     
     assigned_counsellor = models.ForeignKey(
-        "accounts.OrganizationMember",
+        "organizations.OrganizationMember",
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
         related_name="assigned_counsellor"
+    )
+    
+    registration_type = models.CharField(
+        max_length=30,
+        blank=True,
+        null=True
     )
 
     registration_status = models.CharField(
@@ -273,16 +274,166 @@ class StudentRegistration(models.Model):
             models.Index(fields=["public_id"]),
             models.Index(fields=["student"]),
             models.Index(fields=["organization"]),
-            models.Index(fields=["campaign"]),
-            models.Index(fields=["registration_channel"]),
             models.Index(fields=["registration_link"]),
             models.Index(fields=["registration_number"]),
             models.Index(fields=["registration_status"]),
+            models.Index(fields=["registration_type"]),
             models.Index(fields=["academic_year"]),
             models.Index(fields=["registered_at"]),
         ]
 
     def __str__(self):
         return f"{self.registration_number} - {self.student}"
+
+class Order(models.Model):
+    """
+    Stores direct student purchases of packages.
+
+    This table is mainly intended for B2C purchases.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        PAID = "PAID", "Paid"
+        FAILED = "FAILED", "Failed"
+        CANCELLED = "CANCELLED", "Cancelled"
+        REFUNDED = "REFUNDED", "Refunded"
+
+    # ==========================================
+    # PRIMARY KEY
+    # ==========================================
+
+    id = models.BigAutoField(
+        primary_key=True
+    )
+
+    # ==========================================
+    # PUBLIC UUID
+    # ==========================================
+
+    public_id = models.UUIDField(
+        default=uuid.uuid4,
+        unique=True,
+        editable=False,
+        db_index=True
+    )
+
+    # ==========================================
+    # ORDER NUMBER
+    # ==========================================
+
+    order_number = models.CharField(
+        max_length=50,
+        unique=True,
+        db_index=True
+    )
+
+    # ==========================================
+    # STUDENT
+    # ==========================================
+
+    student = models.ForeignKey(
+        "students.Student",
+        on_delete=models.PROTECT,
+        related_name="orders"
+    )
+
+    # ==========================================
+    # PACKAGE
+    # ==========================================
+
+    package = models.ForeignKey(
+        "organizations.Package",
+        on_delete=models.PROTECT,
+        related_name="orders"
+    )
+
+    # ==========================================
+    # QUANTITY
+    # ==========================================
+
+    quantity = models.PositiveIntegerField(
+        default=1,
+        validators=[
+            MinValueValidator(1)
+        ]
+    )
+
+    # ==========================================
+    # UNIT PRICE
+    # ==========================================
+
+    unit_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[
+            MinValueValidator(0)
+        ]
+    )
+
+    # ==========================================
+    # TOTAL AMOUNT
+    # ==========================================
+
+    total_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[
+            MinValueValidator(0)
+        ]
+    )
+
+    # ==========================================
+    # STATUS
+    # ==========================================
+
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True
+    )
+
+    # ==========================================
+    # TIMESTAMPS
+    # ==========================================
+
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True
+    )
+
+    # ==========================================
+    # META
+    # ==========================================
+
+    class Meta:
+        db_table = "orders"
+
+        verbose_name = "Order"
+        verbose_name_plural = "Orders"
+
+        ordering = [
+            "-created_at"
+        ]
+
+        indexes = [
+            models.Index(fields=["public_id"]),
+            models.Index(fields=["order_number"]),
+            models.Index(fields=["student"]),
+            models.Index(fields=["package"]),
+            models.Index(fields=["status"]),
+            models.Index(fields=["created_at"]),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.order_number} - "
+            f"{self.student} - "
+            f"{self.package}"
+        )
 
 

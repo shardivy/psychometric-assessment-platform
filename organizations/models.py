@@ -1,6 +1,9 @@
 import uuid
 
 from django.db import models
+from django.conf import settings
+from django.utils import timezone
+from django.core.validators import MinValueValidator
 
 
 # ==========================================================
@@ -13,6 +16,71 @@ class BaseModel(models.Model):
 
     class Meta:
         abstract = True
+        
+# ==========================================================
+# Package
+# ==========================================================
+
+class Package(BaseModel):
+    
+    class Status(models.TextChoices):
+        ACTIVE = "ACTIVE", "Active"
+        INACTIVE = "INACTIVE", "Inactive"
+        DEPRECATED = "DEPRECATED", "Deprecated"
+    
+    id = models.BigAutoField(primary_key=True)
+    public_id = models.UUIDField(
+        default=uuid.uuid4,
+        unique=True,
+        editable=False,
+        db_index=True
+    )
+    assessment_version = models.ForeignKey(
+        "assessments.AssessmentVersion",
+        on_delete=models.CASCADE,
+        related_name="packages",
+        null=True,
+        blank=True
+    )
+    grade = models.ForeignKey(
+        "assessments.Grade",
+        on_delete=models.CASCADE,
+        related_name="packages",
+        null=True,
+        blank=True
+    )
+    package_name = models.CharField(max_length=200)
+    package_features1 = models.TextField(blank=True, null=True)
+    package_features2 = models.TextField(blank=True, null=True)
+    package_features3 = models.TextField(blank=True, null=True)
+    package_features4 = models.TextField(blank=True, null=True)
+    package_features5 = models.TextField(blank=True, null=True)
+    package_price = models.IntegerField()
+    package_description = models.TextField(blank=True, null=True)
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.ACTIVE
+    )
+    package_deliverable1 = models.TextField(blank=True, null=True)
+    package_deliverable2 = models.TextField(blank=True, null=True)
+    package_deliverable3 = models.TextField(blank=True, null=True)
+    package_deliverable4 = models.TextField(blank=True, null=True)
+    package_deliverable5 = models.TextField(blank=True, null=True)
+    
+    class Meta:
+        db_table = "packages"
+        ordering = ["package_name"]
+        indexes = [
+            models.Index(fields=["public_id"]),
+            models.Index(fields=["assessment_version"]),
+            models.Index(fields=["package_name"]),
+            models.Index(fields=["status"]),
+        ]
+        
+    def __str__(self):
+        return f"{self.package_name} ({self.assessment_version.version_number})"
+    
 
 # ==========================================================
 # Organization
@@ -23,16 +91,20 @@ class Organization(BaseModel):
     class OrganizationType(models.TextChoices):
         SCHOOL = "SCHOOL", "School"
         COLLEGE = "COLLEGE", "College"
-        COACHING = "COACHING", "Coaching Institute"
+        COACHING_INSTITUTE = "COACHING_INSTITUTE", "Coaching Institute"
         COUNSELLOR = "COUNSELLOR", "Independent Counsellor"
         ENTERPRISE = "ENTERPRISE", "Enterprise"
         NGO = "NGO", "NGO"
         FRANCHISE = "FRANCHISE", "Franchise"
+        OTHER =  "OTHER", "Other"
 
     class Status(models.TextChoices):
+        DRAFT = "DRAFT", "Draft" 
+        PENDING = "PENDING", "Pending"
         ACTIVE = "ACTIVE", "Active"
         INACTIVE = "INACTIVE", "Inactive"
         SUSPENDED = "SUSPENDED", "Suspended"
+        ARCHIVED = "ARCHIVED", "Archived"
 
     # Auto Increment Primary Key
     id = models.BigAutoField(primary_key=True)
@@ -47,7 +119,9 @@ class Organization(BaseModel):
 
     organization_code = models.CharField(
         max_length=20,
-        unique=True
+        unique=True,
+        blank=True,
+        null=True
     )
 
     organization_type = models.CharField(
@@ -124,6 +198,14 @@ class Organization(BaseModel):
         choices=Status.choices,
         default=Status.ACTIVE
     )
+    
+    created_by = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.CASCADE,
+        blank=True,
+        null=True,
+        related_name="created_organizations"
+    )
 
     class Meta:
         db_table = "organizations"
@@ -139,6 +221,226 @@ class Organization(BaseModel):
 
     def __str__(self):
         return f"{self.name} ({self.organization_code})"
+    
+# ============================================================
+# ORGANIZATION MEMBER
+# ============================================================
+    
+class OrganizationMember(models.Model):
+
+    class MemberType(models.TextChoices):
+        OWNER = "OWNER", "Owner"
+        ADMIN = "ADMIN", "Admin"
+        COUNSELLOR = "COUNSELLOR", "Counsellor"
+        TEACHER = "TEACHER", "Teacher"
+        COORDINATOR = "COORDINATOR", "Coordinator"
+        STAFF = "STAFF", "Staff"
+
+    class Status(models.TextChoices):
+        INVITED = "INVITED", "Invited"
+        ACTIVE = "ACTIVE", "Active"
+        SUSPENDED = "SUSPENDED", "Suspended"
+        REMOVED = "REMOVED", "Removed"
+
+    id = models.BigAutoField(primary_key=True)
+
+    public_id = models.UUIDField(
+        default=uuid.uuid4,
+        unique=True,
+        editable=False,
+        db_index=True
+    )
+
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name="members"
+    )
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="organization_memberships"
+    )
+
+    member_type = models.CharField(
+        max_length=40,
+        choices=MemberType.choices
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.INVITED
+    )
+
+    joined_at = models.DateTimeField(
+        null=True,
+        blank=True
+    )
+
+    invited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="organization_invitations"
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True
+    )
+
+    class Meta:
+        db_table = "organization_members"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "user"],
+                name="unique_organization_user"
+            )
+        ]
+        indexes = [
+            models.Index(fields=["public_id"]),
+            models.Index(fields=["organization"]),
+            models.Index(fields=["user"]),
+            models.Index(fields=["member_type"]),
+            models.Index(fields=["status"]),
+        ]
+
+    def __str__(self):
+        return f"{self.organization.name} - {self.user}"
+    
+    
+class OrganizationPackage(models.Model):
+
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        ACTIVE = "ACTIVE", "Active"
+        EXPIRED = "EXPIRED", "Expired"
+        SUSPENDED = "SUSPENDED", "Suspended"
+        CANCELLED = "CANCELLED", "Cancelled"
+
+    id = models.BigAutoField(
+        primary_key=True
+    )
+
+    public_id = models.UUIDField(
+        default=uuid.uuid4,
+        unique=True,
+        editable=False,
+        db_index=True
+    )
+
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="organization_packages"
+    )
+
+    package = models.ForeignKey(
+        "organizations.Package",
+        on_delete=models.PROTECT,
+        related_name="organization_packages"
+    )
+
+    contract_code = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True
+    )
+
+    negotiated_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[
+            MinValueValidator(0)
+        ],
+        null=True,
+        blank=True
+    )
+
+    currency = models.CharField(
+        max_length=3,
+        default="INR",
+        blank=True,
+        null=True
+    )
+
+    seat_limit = models.PositiveIntegerField(
+        validators=[
+            MinValueValidator(1)
+        ],
+        null=True,
+        blank=True
+    )
+
+    used_seats = models.PositiveIntegerField(
+        default=0
+    )
+
+    valid_from = models.DateField()
+
+    valid_until = models.DateField(
+        blank=True,
+        null=True
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING
+    )
+
+    notes = models.TextField(
+        blank=True,
+        null=True
+    )
+
+    assigned_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="assigned_organization_packages"
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True
+    )
+
+    class Meta:
+        db_table = "organization_packages"
+        ordering = ["-created_at"]
+        
+        constraints = [
+        models.UniqueConstraint(
+            fields=["organization", "package"],
+            name="unique_organization_package"
+        )
+    ]
+
+    indexes = [
+        models.Index(fields=["organization"]),
+        models.Index(fields=["package"]),
+        models.Index(fields=["status"]),
+        models.Index(fields=["valid_from"]),
+        models.Index(fields=["valid_until"]),
+    ]
+
+    def __str__(self):
+        return f"{self.organization.name} - {self.package.package_name}"
+
+    @property
+    def available_seats(self):
+        return self.seat_limit - self.used_seats
     
 # ==========================================================
 # Campaign
@@ -342,90 +644,48 @@ class RegistrationChannel(models.Model):
         return f"{self.channel_name} ({self.campaign.name})"
     
 class RegistrationLink(models.Model):
-    """
-    Registration entry point for students.
 
-    Every student enters the platform through a Registration Link.
+    class Status(models.TextChoices):
+        ACTIVE = "ACTIVE", "Active"
+        INACTIVE = "INACTIVE", "Inactive"
+        EXPIRED = "EXPIRED", "Expired"
+        REVOKED = "REVOKED", "Revoked"
 
-    Example:
-    https://assessment.truemindpath.com/r/e4WzEwV2
-    """
-
-    class RegistrationChannel(models.TextChoices):
-        CLASS_6 = "CLASS_6", "Class 6"
-        CLASS_7 = "CLASS_7", "Class 7"
-        CLASS_8 = "CLASS_8", "Class 8"
-        CLASS_9 = "CLASS_9", "Class 9"
-        CLASS_10 = "CLASS_10", "Class 10"
-        CLASS_11 = "CLASS_11", "Class 11"
-        CLASS_12 = "CLASS_12", "Class 12"
-        COLLEGE = "COLLEGE", "College"
-        WEBSITE = "WEBSITE", "Website"
-        QR_CODE = "QR_CODE", "QR Code"
-        COUNSELLOR = "COUNSELLOR", "Counsellor"
-        BULK_IMPORT = "BULK_IMPORT", "Bulk Import"
-        DIRECT_LINK = "DIRECT_LINK", "Direct Link"
-
-    class RegistrationSource(models.TextChoices):
-        URL = "URL", "URL"
-        QR_CODE = "QR_CODE", "QR Code"
-        MANUAL = "MANUAL", "Manual"
-        API = "API", "API"
-        EXCEL_IMPORT = "EXCEL_IMPORT", "Excel Import"
-
-    # Primary Key
     id = models.BigAutoField(primary_key=True)
 
-    # Public UUID
     public_id = models.UUIDField(
         default=uuid.uuid4,
-        editable=False,
         unique=True,
+        editable=False,
         db_index=True
     )
 
-    campaign = models.ForeignKey(
-        Campaign,
+    organization = models.ForeignKey(
+        Organization,
         on_delete=models.CASCADE,
         related_name="registration_links"
     )
 
-    link_code = models.CharField(
+    token_hash = models.CharField(
+        max_length=255
+    )
+
+    public_slug = models.CharField(
         max_length=100,
-        unique=True
+        unique=True,
+        db_index=True
     )
 
-    registration_channel = models.CharField(
-        max_length=30,
-        choices=RegistrationChannel.choices
-    )
-
-    registration_source = models.CharField(
-        max_length=30,
-        choices=RegistrationSource.choices
-    )
-
-    display_name = models.CharField(
+    link_name = models.CharField(
         max_length=150,
         blank=True,
         null=True
     )
 
-    # Temporary
-    assessment_version = models.ForeignKey(
-        "assessments.AssessmentVersion",
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True
-    )
-
-    max_registrations = models.PositiveIntegerField(
-        blank=True,
-        null=True
-    )
-
-    registrations_count = models.PositiveIntegerField(
-        default=0
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.ACTIVE
     )
 
     expires_at = models.DateTimeField(
@@ -433,20 +693,17 @@ class RegistrationLink(models.Model):
         null=True
     )
 
-    allow_duplicate_email = models.BooleanField(
-        default=False
+    max_registrations = models.PositiveIntegerField(
+        blank=True,
+        null=True
     )
 
-    allow_duplicate_mobile = models.BooleanField(
-        default=False
-    )
-
-    is_active = models.BooleanField(
-        default=True
+    registration_count = models.PositiveIntegerField(
+        default=0
     )
 
     created_by = models.ForeignKey(
-        "accounts.User",
+        settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
@@ -463,20 +720,36 @@ class RegistrationLink(models.Model):
 
     class Meta:
         db_table = "registration_links"
-
-        verbose_name = "Registration Link"
-        verbose_name_plural = "Registration Links"
-
         ordering = ["-created_at"]
-
+        
         indexes = [
             models.Index(fields=["public_id"]),
-            models.Index(fields=["campaign"]),
-            models.Index(fields=["link_code"]),
-            models.Index(fields=["is_active"]),
+            models.Index(fields=["organization"]),
+            models.Index(fields=["public_slug"]),
+            models.Index(fields=["status"]),
             models.Index(fields=["expires_at"]),
         ]
 
     def __str__(self):
-        return f"{self.display_name or self.link_code}" 
-    
+        return self.public_slug
+
+    def is_valid(self):
+        if self.status != self.Status.ACTIVE:
+            return False
+
+        if (
+            self.expires_at
+            and timezone.now() >= self.expires_at
+        ):
+            return False
+
+        if (
+            self.max_registrations is not None
+            and self.registration_count >= self.max_registrations
+        ):
+            return False
+
+        if self.organization.status != Organization.Status.ACTIVE:
+            return False
+
+        return True   

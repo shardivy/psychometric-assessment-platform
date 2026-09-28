@@ -1,5 +1,7 @@
 from django.urls import path
 
+from accounts.views import SendStudentEmailOTPAPIView, StudentForgotPasswordAPIView, StudentLoginAPIView, StudentResetPasswordAPIView, VerifyPasswordResetOTPAPIView, VerifyStudentEmailOTPAPIView
+
 # from accounts.views import ChangePasswordAPIView, CurrentUserAPIView, ForgotPasswordAPIView, LoginAPIView, LogoutAPIView, RefreshTokenAPIView, RegisterAPIView, ResendOTPAPIView, ResetPasswordAPIView, VerifyOTPAPIView, VerifyResetOTPAPIView
 
 # urlpatterns = [
@@ -82,3 +84,38 @@ from django.urls import path
 #         name="current_user",
 #     ),
 # ]
+
+urlpatterns = [
+
+    path(
+        "student/send-email-otp/",
+        SendStudentEmailOTPAPIView.as_view(),
+        name="student-send-email-otp"
+    ),
+    path(
+        "student/verify-email-otp/",
+        VerifyStudentEmailOTPAPIView.as_view(),
+        name="student-verify-email-otp"
+    ),
+    path(
+        "students/login/",
+        StudentLoginAPIView.as_view(),
+        name="student-login"
+    ),
+    path(
+        "students/forgot-password/",
+        StudentForgotPasswordAPIView.as_view(),
+        name="student-forgot-password"
+    ),
+    path(
+        "students/verify-password-otp/",
+        VerifyPasswordResetOTPAPIView.as_view(),
+        name="student-verify-password"
+    ),
+     path(
+        "students/reset-password/",
+        StudentResetPasswordAPIView.as_view(),
+        name="student-reset-password"
+    ),
+
+]
